@@ -37,14 +37,98 @@
 
 ```toml
 [dependencies]
-intern-lang = "0.1"
+intern-lang = "0.2"
 ```
+
+<br>
+
+## Quick start
+
+```rust
+use intern_lang::Interner;
+
+let mut interner = Interner::new();
+
+// Intern returns a small Copy handle; the same string always returns the same one.
+let while_kw = interner.intern("while");
+let for_kw = interner.intern("for");
+assert_eq!(interner.intern("while"), while_kw);
+
+// Name comparisons are now integer comparisons, not byte walks.
+assert_ne!(while_kw, for_kw);
+
+// Resolve borrows the original bytes straight out of the store.
+assert_eq!(interner.resolve(while_kw), Some("while"));
+```
+
+Folding a token stream down to symbols, so later passes compare integers and a
+name in an AST node costs four bytes instead of an owned `String`:
+
+```rust
+use intern_lang::{Interner, Symbol};
+
+let mut interner = Interner::new();
+let source = ["let", "x", "=", "x", "+", "x"];
+let tokens: Vec<Symbol> = source.iter().map(|t| interner.intern(t)).collect();
+
+// The three `x` occurrences collapsed to one symbol.
+assert_eq!(tokens[1], tokens[3]);
+assert_eq!(interner.len(), 4); // let, x, =, +
+```
+
+<br>
+
+## Features
+
+- **Four-byte handle.** A `Symbol` is a `NonZeroU32` newtype — `Copy`, integer
+  equality / ordering / hashing, and `Option<Symbol>` is four bytes too.
+- **Bytes stored once.** Interned strings are appended end to end in a single
+  contiguous buffer; the dedup index stores symbol ids, not a second copy.
+- **Allocation-free hits.** Interning a string already seen is a hash lookup with
+  no allocation and no copy.
+- **Growth-stable symbols.** A symbol keeps resolving to the same string for the
+  interner's whole lifetime, including after the backing store reallocates.
+- **`no_std`.** Relies only on `alloc`; the default `std` feature is additive. No
+  runtime dependencies beyond an optional `serde` (planned).
+- **`#![forbid(unsafe_code)]`.** The contiguous store is implemented without any
+  `unsafe`.
+
+<br>
+
+## Performance
+
+Resolution is a side-table index plus a slice — measured at roughly **1.1 ns per
+`resolve`** (Criterion mean, Windows x86_64, Rust stable, on the development
+machine). Interning an already-seen string is allocation-free: a hash over the
+bytes, an open-addressing probe, and one byte comparison to confirm the hit. The
+numbers below are a v0.x baseline, tracked over time rather than advertised as
+final:
+
+| Operation | Mean |
+|---|---|
+| `resolve` (id → `&str`) | ~1.1 ns |
+| `intern` (repeat hit, no allocation) | ~0.23 µs |
+| `intern` (new string, amortised growth) | ~0.62 µs |
+
+Run them yourself with `cargo bench`.
+
+<br>
+
+## API overview
+
+For the complete reference with examples, see [`docs/API.md`](./docs/API.md).
+
+- [`Symbol`](./docs/API.md#symbol) — four-byte `Copy` handle to an interned string.
+- [`Interner`](./docs/API.md#interner) — single-threaded interner: `intern`,
+  `get`, `resolve`, `len`, `with_capacity`.
 
 <br>
 
 ## Status
 
-This is the <code>v0.1.0</code> scaffold: structure, tooling, and quality gates are in place; the implementation lands across the 0.x series per the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a> and <a href="./docs/API.md"><code>docs/API.md</code></a>.
+`v0.2.0` ships the core interner and symbol. The thread-safe `ConcurrentInterner`,
+optional `serde` for `Symbol`, and the defined symbol-space-exhaustion result land
+across the remaining 0.x series per the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>; the public surface freezes at <code>1.0.0</code>.
 
 <hr>
 <br>
