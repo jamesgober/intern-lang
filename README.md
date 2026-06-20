@@ -37,7 +37,7 @@
 
 ```toml
 [dependencies]
-intern-lang = "0.2"
+intern-lang = "0.3"
 ```
 
 <br>
@@ -88,6 +88,9 @@ assert_eq!(interner.len(), 4); // let, x, =, +
   no allocation and no copy.
 - **Growth-stable symbols.** A symbol keeps resolving to the same string for the
   interner's whole lifetime, including after the backing store reallocates.
+- **Thread-safe variant.** `ConcurrentInterner` lets many threads intern into one
+  shared symbol space; the warm read path runs concurrently and racing threads
+  never mint a duplicate symbol. Both interners share the `Lookup` read trait.
 - **`no_std`.** Relies only on `alloc`; the default `std` feature is additive. No
   runtime dependencies beyond an optional `serde` (planned).
 - **`#![forbid(unsafe_code)]`.** The contiguous store is implemented without any
@@ -110,7 +113,35 @@ final:
 | `intern` (repeat hit, no allocation) | ~0.23 µs |
 | `intern` (new string, amortised growth) | ~0.62 µs |
 
-Run them yourself with `cargo bench`.
+Run them yourself with `cargo bench`. The warm read path scales across threads:
+at 8 threads the `ConcurrentInterner` sustains roughly 4× the single-thread intern
+throughput, since hits are served under a shared read lock.
+
+<br>
+
+## Concurrent interning
+
+```rust
+use std::sync::Arc;
+use std::thread;
+
+use intern_lang::ConcurrentInterner;
+
+let interner = Arc::new(ConcurrentInterner::new());
+
+let handles: Vec<_> = (0..4)
+    .map(|_| {
+        let interner = Arc::clone(&interner);
+        thread::spawn(move || interner.intern("shared"))
+    })
+    .collect();
+
+let symbols: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+// Every thread agrees on one symbol; "shared" was interned exactly once.
+assert!(symbols.iter().all(|&s| s == symbols[0]));
+assert_eq!(interner.len(), 1);
+```
 
 <br>
 
@@ -121,14 +152,17 @@ For the complete reference with examples, see [`docs/API.md`](./docs/API.md).
 - [`Symbol`](./docs/API.md#symbol) — four-byte `Copy` handle to an interned string.
 - [`Interner`](./docs/API.md#interner) — single-threaded interner: `intern`,
   `get`, `resolve`, `len`, `with_capacity`.
+- [`ConcurrentInterner`](./docs/API.md#concurrentinterner) — thread-safe interner
+  sharing one symbol space (requires the `std` feature).
+- [`Lookup`](./docs/API.md#lookup) — read-side trait both interners implement.
 
 <br>
 
 ## Status
 
-`v0.2.0` ships the core interner and symbol. The thread-safe `ConcurrentInterner`,
-optional `serde` for `Symbol`, and the defined symbol-space-exhaustion result land
-across the remaining 0.x series per the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>; the public surface freezes at <code>1.0.0</code>.
+`v0.3.0` ships the core interner, the symbol, and the thread-safe
+`ConcurrentInterner`. Optional `serde` for `Symbol` and the defined
+symbol-space-exhaustion result land across the remaining 0.x series per the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>; the public surface freezes at <code>1.0.0</code>.
 
 <hr>
 <br>

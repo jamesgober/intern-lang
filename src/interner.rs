@@ -241,6 +241,32 @@ impl Interner {
         Some(&self.buf[span.start..span.start + span.len])
     }
 
+    /// Runs `f` against the string `symbol` names, returning its result, or `None`
+    /// if `symbol` is out of range.
+    ///
+    /// This is the [`Lookup`](crate::Lookup) trait's resolution form. For the
+    /// single-threaded interner it is a thin wrapper over
+    /// [`resolve`](Interner::resolve) — prefer `resolve` here, which hands back the
+    /// borrowed slice directly. The closure form exists so the same generic code
+    /// works against the [`ConcurrentInterner`](crate::ConcurrentInterner), where
+    /// the borrow cannot outlive the read lock.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use intern_lang::Interner;
+    ///
+    /// let mut interner = Interner::new();
+    /// let sym = interner.intern("identifier");
+    /// assert_eq!(interner.resolve_with(sym, str::len), Some(10));
+    /// ```
+    pub fn resolve_with<R, F>(&self, symbol: Symbol, f: F) -> Option<R>
+    where
+        F: FnOnce(&str) -> R,
+    {
+        self.resolve(symbol).map(f)
+    }
+
     /// Returns the number of distinct strings interned so far.
     ///
     /// This is also the id that the next newly interned string will receive.
@@ -382,6 +408,31 @@ impl Default for Interner {
     #[inline]
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::Lookup for Interner {
+    #[inline]
+    fn get(&self, s: &str) -> Option<Symbol> {
+        Interner::get(self, s)
+    }
+
+    #[inline]
+    fn resolve_with<R, F>(&self, symbol: Symbol, f: F) -> Option<R>
+    where
+        F: FnOnce(&str) -> R,
+    {
+        Interner::resolve_with(self, symbol, f)
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        Interner::len(self)
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        Interner::is_empty(self)
     }
 }
 

@@ -15,8 +15,10 @@
   - [`Interner::intern`](#internerintern)
   - [`Interner::get`](#internerget)
   - [`Interner::resolve`](#internerresolve)
+  - [`Interner::resolve_with`](#internerresolve_with)
   - [`Interner::len` / `Interner::is_empty`](#internerlen--interneris_empty)
-- [`ConcurrentInterner`](#concurrentinterner) _(planned, v0.3.0)_
+- [`ConcurrentInterner`](#concurrentinterner)
+- [`Lookup`](#lookup)
 - [Feature flags](#feature-flags)
 - [Guarantees](#guarantees)
 
@@ -42,11 +44,12 @@ The public surface is intentionally small: one handle type and one interner.
 
 ```toml
 [dependencies]
-intern-lang = "0.2"
+intern-lang = "0.3"
 ```
 
 The crate is `no_std`-compatible (it relies only on `alloc`); the default `std`
-feature is additive.
+feature is additive. [`ConcurrentInterner`](#concurrentinterner) requires the
+`std` feature.
 
 ---
 
@@ -317,6 +320,39 @@ for i in 0..10_000 {
 assert_eq!(interner.resolve(first), Some("first"));
 ```
 
+### `Interner::resolve_with`
+
+```rust
+pub fn resolve_with<R, F>(&self, symbol: Symbol, f: F) -> Option<R>
+where
+    F: FnOnce(&str) -> R
+```
+
+Runs `f` against the string `symbol` names and returns its result, or `None` if
+`symbol` is out of range. This is the [`Lookup`](#lookup) trait's resolution form.
+For the single-threaded interner it is a thin wrapper over
+[`resolve`](#internerresolve) — prefer `resolve`, which hands back the slice
+directly. The closure form exists so the same generic code also works against
+[`ConcurrentInterner`](#concurrentinterner), where the borrow cannot outlive the
+read lock.
+
+**Parameters:**
+
+- `symbol` — a symbol issued by this interner.
+- `f` — a closure run against the resolved string.
+
+**Returns:** `Some(f(resolved))`, or `None` if `symbol` is out of range.
+
+```rust
+use intern_lang::Interner;
+
+let mut interner = Interner::new();
+let sym = interner.intern("identifier");
+
+assert_eq!(interner.resolve_with(sym, str::len), Some(10));
+assert_eq!(interner.resolve_with(sym, |s| s.to_uppercase()), Some("IDENTIFIER".to_string()));
+```
+
 ### `Interner::len` / `Interner::is_empty`
 
 ```rust
@@ -347,8 +383,186 @@ assert!(!interner.is_empty());
 
 ## `ConcurrentInterner`
 
-_(planned, v0.3.0)_ A thread-safe interner many front-end threads can intern into
-at once, sharing one symbol space, behind the same trait seam as `Interner`.
+A thread-safe interner many threads can intern into at once, sharing one symbol
+space. Requires the `std` feature (on by default).
+
+`ConcurrentInterner` wraps [`Interner`](#interner) in an `RwLock` and exposes the
+same operations through `&self`. It is additive: storage, deduplication, and the
+symbol stability guarantees are exactly those of `Interner`; this type only adds
+synchronisation. Interning a string already present is served under a shared read
+lock, so the warm-cache path runs concurrently across threads; only a new string
+takes the exclusive write lock, and the insert re-checks under it, so two threads
+racing to intern the same new string still resolve to one symbol. Lock poisoning
+is recovered internally rather than re-raised as a panic.
+
+**Derives:** `Debug` (shows the string count), `Default`. Is `Send + Sync`.
+
+### `ConcurrentInterner::new` / `with_capacity`
+
+```rust
+pub fn new() -> Self
+pub fn with_capacity(capacity: usize) -> Self
+```
+
+Create an empty concurrent interner; `with_capacity` pre-sizes the dedup index for
+about `capacity` distinct strings. Both mirror the [`Interner`](#interner)
+constructors.
+
+```rust
+use intern_lang::ConcurrentInterner;
+
+let interner = ConcurrentInterner::with_capacity(4_096);
+assert!(interner.is_empty());
+```
+
+### `ConcurrentInterner::intern`
+
+```rust
+pub fn intern(&self, s: &str) -> Symbol
+```
+
+Interns `s` from a shared `&self` reference. The same string always yields the
+same symbol, even when several threads intern it at once.
+
+**Parameters:**
+
+- `s` — the string to intern.
+
+**Returns:** the symbol for `s`.
+
+```rust
+use std::sync::Arc;
+use std::thread;
+
+use intern_lang::ConcurrentInterner;
+
+let interner = Arc::new(ConcurrentInterner::new());
+
+let handles: Vec<_> = (0..4)
+    .map(|_| {
+        let interner = Arc::clone(&interner);
+        thread::spawn(move || interner.intern("shared"))
+    })
+    .collect();
+
+let symbols: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+// All threads agree on one symbol; it was interned exactly once.
+assert!(symbols.iter().all(|&s| s == symbols[0]));
+assert_eq!(interner.len(), 1);
+```
+
+### `ConcurrentInterner::get`
+
+```rust
+pub fn get(&self, s: &str) -> Option<Symbol>
+```
+
+Read-only lookup that never interns. Returns `Some(symbol)` if `s` has been
+interned, `None` otherwise.
+
+```rust
+use intern_lang::ConcurrentInterner;
+
+let interner = ConcurrentInterner::new();
+let sym = interner.intern("present");
+assert_eq!(interner.get("present"), Some(sym));
+assert_eq!(interner.get("absent"), None);
+```
+
+### `ConcurrentInterner::resolve_with`
+
+```rust
+pub fn resolve_with<R, F>(&self, symbol: Symbol, f: F) -> Option<R>
+where
+    F: FnOnce(&str) -> R
+```
+
+Runs `f` against the resolved string while holding the read lock, returning its
+result, or `None` if `symbol` is out of range. This is the zero-copy resolution
+path — keep `f` short, since it runs under the lock.
+
+```rust
+use intern_lang::ConcurrentInterner;
+
+let interner = ConcurrentInterner::new();
+let sym = interner.intern("measured");
+assert_eq!(interner.resolve_with(sym, str::len), Some(8));
+```
+
+### `ConcurrentInterner::resolve`
+
+```rust
+pub fn resolve(&self, symbol: Symbol) -> Option<String>
+```
+
+Resolves `symbol` to an owned `String`, copying the bytes out so the result
+outlives the lock. On a hot path that only inspects the string, prefer
+[`resolve_with`](#concurrentinternerresolve_with) to avoid the allocation.
+
+```rust
+use intern_lang::ConcurrentInterner;
+
+let interner = ConcurrentInterner::new();
+let sym = interner.intern("owned");
+assert_eq!(interner.resolve(sym).as_deref(), Some("owned"));
+```
+
+### `ConcurrentInterner::len` / `is_empty`
+
+```rust
+pub fn len(&self) -> usize
+pub fn is_empty(&self) -> bool
+```
+
+Report the number of distinct strings interned, and whether that is zero.
+
+---
+
+## `Lookup`
+
+The read-side contract both interners implement, so generic code can accept
+either the single-threaded [`Interner`](#interner) or the
+[`ConcurrentInterner`](#concurrentinterner).
+
+```rust
+pub trait Lookup {
+    fn get(&self, s: &str) -> Option<Symbol>;
+    fn resolve_with<R, F>(&self, symbol: Symbol, f: F) -> Option<R>
+    where
+        F: FnOnce(&str) -> R;
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool { self.len() == 0 } // provided
+}
+```
+
+Interning is deliberately not on the trait: the two interners disagree on how it
+is called (`&mut self` for the single-threaded one, `&self` for the concurrent
+one), and forcing a common signature would tax the single-threaded hot path with
+synchronisation it does not need. Resolution is expressed as `resolve_with` rather
+than a method returning `&str`, because a concurrent interner can only expose the
+bytes while it holds its read lock.
+
+The trait is not object-safe (`resolve_with` is generic), so use it as a generic
+bound (`&impl Lookup` / `T: Lookup`), not as `dyn Lookup`.
+
+```rust
+use intern_lang::{ConcurrentInterner, Interner, Lookup};
+
+// Works against either interner kind.
+fn name_len<L: Lookup>(interner: &L, s: &str) -> Option<usize> {
+    let sym = interner.get(s)?;
+    interner.resolve_with(sym, str::len)
+}
+
+let mut single = Interner::new();
+let _ = single.intern("alpha");
+assert_eq!(name_len(&single, "alpha"), Some(5));
+
+let shared = ConcurrentInterner::new();
+let _ = shared.intern("beta");
+assert_eq!(name_len(&shared, "beta"), Some(4));
+```
 
 ---
 
@@ -356,7 +570,7 @@ at once, sharing one symbol space, behind the same trait seam as `Interner`.
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `std` | yes | Use the standard library. With it disabled the crate is `no_std` (it always relies on `alloc`). |
+| `std` | yes | Use the standard library and enable [`ConcurrentInterner`](#concurrentinterner). With it disabled the crate is `no_std` (it always relies on `alloc`) and only the single-threaded [`Interner`](#interner) is available. |
 | `serde` | no | Serialise/deserialise `Symbol`. _(planned, v0.4.0)_ |
 
 `intern-lang` has no runtime dependencies beyond an optional `serde`.

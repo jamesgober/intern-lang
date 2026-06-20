@@ -21,6 +21,34 @@
 
 ---
 
+## [0.3.0] - 2026-06-20
+
+The concurrent interner. `ConcurrentInterner` lets many threads intern into one
+shared symbol space at once, behind the same read-side seam as the single-threaded
+`Interner`. It is additive: the storage, the dedup index, and the symbol stability
+guarantees are unchanged — this release only adds synchronisation, and the
+single-threaded hot path is untouched.
+
+### Added
+
+- `ConcurrentInterner` (requires the `std` feature): a thread-safe interner with
+  `new`, `with_capacity`, `intern(&self, &str)`, `get`, `resolve_with`,
+  `resolve` (owned), `len`, `is_empty`, `Default`, and `Debug`. `Send + Sync`.
+  - Interning a string already present is served under a shared read lock, so the
+    warm-cache path runs concurrently; only a new string takes the exclusive write
+    lock, and the insert re-checks under it so racing threads never mint a
+    duplicate symbol for the same string.
+  - Lock poisoning is recovered rather than propagated as a second panic.
+- `Lookup` trait: the read-side contract (`get`, `resolve_with`, `len`,
+  `is_empty`) implemented by both `Interner` and `ConcurrentInterner`, so generic
+  code can accept either.
+- `Interner::resolve_with` — closure-based resolution mirroring the trait form.
+- Multi-threaded contention tests proving no duplicate symbols across threads, a
+  lock-poison recovery test, and `Send + Sync` assertions.
+- A concurrent benchmark group measuring warm-path throughput at 1/4/8 threads.
+
+---
+
 ## [0.2.0] - 2026-06-19
 
 The core interner and symbol. `Interner` interns a string to a small `Copy`
@@ -73,6 +101,7 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/intern-lang/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jamesgober/intern-lang/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jamesgober/intern-lang/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamesgober/intern-lang/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamesgober/intern-lang/releases/tag/v0.1.0

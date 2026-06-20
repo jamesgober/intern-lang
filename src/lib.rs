@@ -18,6 +18,10 @@
 //!   [`resolve`](Interner::resolve) borrows the bytes back out of the store.
 //! - [`Symbol`] — a four-byte `Copy` handle whose equality, ordering, and hashing
 //!   are integer operations.
+//! - [`ConcurrentInterner`] — a thread-safe interner many threads can intern into
+//!   at once, sharing one symbol space (requires the `std` feature).
+//! - [`Lookup`] — the read-side trait both interners implement, so generic code
+//!   can accept either.
 //!
 //! ## Example
 //!
@@ -63,8 +67,14 @@
 
 extern crate alloc;
 
+#[cfg(feature = "std")]
+mod concurrent;
 mod interner;
+mod lookup;
 mod symbol;
 
+#[cfg(feature = "std")]
+pub use concurrent::ConcurrentInterner;
 pub use interner::Interner;
+pub use lookup::Lookup;
 pub use symbol::Symbol;
