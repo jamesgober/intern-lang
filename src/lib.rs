@@ -69,12 +69,14 @@ extern crate alloc;
 
 #[cfg(feature = "std")]
 mod concurrent;
+mod error;
 mod interner;
 mod lookup;
 mod symbol;
 
 #[cfg(feature = "std")]
 pub use concurrent::ConcurrentInterner;
+pub use error::InternError;
 pub use interner::Interner;
 pub use lookup::Lookup;
 pub use symbol::Symbol;

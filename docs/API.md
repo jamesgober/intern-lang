@@ -1,7 +1,7 @@
 # intern-lang &mdash; API Reference
 
 > Complete reference for every public item in `intern-lang`, with examples.
-> **Status: pre-1.0 — the surface is being designed across the 0.x series and frozen at `1.0.0`.** Items marked _(planned)_ are not yet implemented; see [`dev/ROADMAP.md`](../dev/ROADMAP.md).
+> **Status: feature-frozen.** As of v0.4.0 this is the complete public surface; no items will be added or changed before `1.0.0`, which will mark it stable. See [Stability](#stability) and [`dev/ROADMAP.md`](../dev/ROADMAP.md).
 
 ## Table of Contents
 
@@ -13,14 +13,17 @@
   - [`Interner::new`](#internernew)
   - [`Interner::with_capacity`](#internerwith_capacity)
   - [`Interner::intern`](#internerintern)
+  - [`Interner::try_intern`](#internertry_intern)
   - [`Interner::get`](#internerget)
   - [`Interner::resolve`](#internerresolve)
   - [`Interner::resolve_with`](#internerresolve_with)
   - [`Interner::len` / `Interner::is_empty`](#internerlen--interneris_empty)
 - [`ConcurrentInterner`](#concurrentinterner)
 - [`Lookup`](#lookup)
+- [`InternError`](#internerror)
 - [Feature flags](#feature-flags)
 - [Guarantees](#guarantees)
+- [Stability](#stability)
 
 ---
 
@@ -44,12 +47,13 @@ The public surface is intentionally small: one handle type and one interner.
 
 ```toml
 [dependencies]
-intern-lang = "0.3"
+intern-lang = "0.4"
 ```
 
 The crate is `no_std`-compatible (it relies only on `alloc`); the default `std`
 feature is additive. [`ConcurrentInterner`](#concurrentinterner) requires the
-`std` feature.
+`std` feature; `serde` support for [`Symbol`](#symbol) is behind the `serde`
+feature.
 
 ---
 
@@ -131,6 +135,36 @@ kinds.insert(interner.intern("i32"), "integer");
 kinds.insert(interner.intern("f64"), "float");
 
 assert_eq!(kinds.get(&interner.intern("i32")), Some(&"integer"));
+```
+
+### `Symbol::from_u32`
+
+```rust
+pub fn from_u32(id: u32) -> Option<Symbol>
+```
+
+Reconstructs a symbol from a raw 1-based id — the inverse of
+[`as_u32`](#symbolas_u32) — for rebuilding a symbol from an id stored elsewhere (a
+file, a wire message, an external table). Returns `None` for `0`. It only rebuilds
+the handle; whether the id names anything is decided when you
+[`resolve`](#internerresolve) it, which returns `None` for an out-of-range id.
+
+**Parameters:**
+
+- `id` — a raw symbol id.
+
+**Returns:** `Some(symbol)` for any non-zero `id`, `None` for `0`.
+
+```rust
+use intern_lang::{Interner, Symbol};
+
+let mut interner = Interner::new();
+let sym = interner.intern("persisted");
+
+let rebuilt = Symbol::from_u32(sym.as_u32()).unwrap();
+assert_eq!(rebuilt, sym);
+assert_eq!(interner.resolve(rebuilt), Some("persisted"));
+assert_eq!(Symbol::from_u32(0), None);
 ```
 
 ---
@@ -242,6 +276,37 @@ let tokens: Vec<Symbol> = source.iter().map(|t| interner.intern(t)).collect();
 assert_eq!(tokens[1], tokens[3]);
 assert_eq!(tokens[3], tokens[5]);
 assert_eq!(interner.len(), 4); // let, x, =, +
+```
+
+### `Interner::try_intern`
+
+```rust
+pub fn try_intern(&mut self, s: &str) -> Result<Symbol, InternError>
+```
+
+The fallible counterpart to [`intern`](#internerintern). It behaves identically —
+deduplicating, allocation-free on a repeat hit — except that interning a *new*
+string when the symbol space is full returns
+[`InternError::SymbolSpaceExhausted`](#internerror) instead of saturating.
+Interning a string that already exists never fails.
+
+**Parameters:**
+
+- `s` — the string to intern.
+
+**Returns:** `Ok(symbol)`, or `Err(InternError::SymbolSpaceExhausted)` when `s` is
+new and all `u32::MAX` symbols have been issued — unreachable for any input that
+fits in memory.
+
+```rust
+use intern_lang::Interner;
+
+let mut interner = Interner::new();
+let sym = interner.try_intern("identifier").expect("space available");
+assert_eq!(interner.resolve(sym), Some("identifier"));
+
+// Re-interning the same string yields the same symbol and never errors.
+assert_eq!(interner.try_intern("identifier"), Ok(sym));
 ```
 
 ### `Interner::get`
@@ -452,6 +517,25 @@ assert!(symbols.iter().all(|&s| s == symbols[0]));
 assert_eq!(interner.len(), 1);
 ```
 
+### `ConcurrentInterner::try_intern`
+
+```rust
+pub fn try_intern(&self, s: &str) -> Result<Symbol, InternError>
+```
+
+The fallible counterpart to [`intern`](#concurrentinternerintern), with the same
+two-step locking. A string already present is returned under the read lock and
+never errors; only a new string at the symbol-space bound returns
+[`InternError::SymbolSpaceExhausted`](#internerror).
+
+```rust
+use intern_lang::ConcurrentInterner;
+
+let interner = ConcurrentInterner::new();
+let sym = interner.try_intern("name").expect("space available");
+assert_eq!(interner.try_intern("name"), Ok(sym));
+```
+
 ### `ConcurrentInterner::get`
 
 ```rust
@@ -566,12 +650,46 @@ assert_eq!(name_len(&shared, "beta"), Some(4));
 
 ---
 
+## `InternError`
+
+The error returned by [`try_intern`](#internertry_intern). It is
+`#[non_exhaustive]` and implements `core::error::Error` (zero dependencies,
+`no_std`).
+
+```rust
+#[non_exhaustive]
+pub enum InternError {
+    /// The symbol space is exhausted: all `u32::MAX` symbols have been issued.
+    SymbolSpaceExhausted,
+}
+```
+
+Because the enum is `#[non_exhaustive]`, a `match` on it must include a wildcard
+arm — future releases may add variants without it being a breaking change.
+
+```rust
+use intern_lang::{InternError, Interner};
+
+let mut interner = Interner::new();
+assert!(interner.try_intern("name").is_ok());
+
+fn describe(err: InternError) -> &'static str {
+    match err {
+        InternError::SymbolSpaceExhausted => "out of symbols",
+        _ => "unknown interning error",
+    }
+}
+assert_eq!(describe(InternError::SymbolSpaceExhausted), "out of symbols");
+```
+
+---
+
 ## Feature flags
 
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `std` | yes | Use the standard library and enable [`ConcurrentInterner`](#concurrentinterner). With it disabled the crate is `no_std` (it always relies on `alloc`) and only the single-threaded [`Interner`](#interner) is available. |
-| `serde` | no | Serialise/deserialise `Symbol`. _(planned, v0.4.0)_ |
+| `serde` | no | Serialise/deserialise [`Symbol`](#symbol) (transparently, as its integer id). |
 
 `intern-lang` has no runtime dependencies beyond an optional `serde`.
 
@@ -591,8 +709,29 @@ tests against a `HashMap` reference interner:
   than passing an integer.
 
 Symbol ids span `1..=u32::MAX`, so an interner holds up to `u32::MAX` distinct
-strings — a bound that exhausts memory long before the id space. A defined,
-non-panicking exhaustion result is scheduled for v0.4.0.
+strings — a bound that exhausts memory long before the id space. At the bound,
+[`intern`](#internerintern) saturates while [`try_intern`](#internertry_intern)
+returns [`InternError::SymbolSpaceExhausted`](#internerror).
+
+---
+
+## Stability
+
+As of **v0.4.0 the public surface is feature-frozen**: the items documented above
+are the complete set, and no public item will be added, removed, or changed in
+signature or documented behaviour before `1.0.0`. The `1.0.0` release will mark
+this surface stable under [Semantic Versioning](https://semver.org/) — after it,
+any breaking change requires a major version bump.
+
+Two deliberate extension points are reserved so the freeze does not preclude
+growth:
+
+- `InternError` is `#[non_exhaustive]`, so new failure modes can be added as
+  variants without a breaking change. Always include a wildcard `match` arm.
+- New methods, feature flags, and trait implementations may still be *added* under
+  SemVer's additive rule; nothing in the table above will be taken away or altered.
+
+The MSRV is **1.85**. An MSRV increase is treated as a minor, not a patch, change.
 
 ---
 

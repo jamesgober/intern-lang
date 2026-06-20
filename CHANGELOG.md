@@ -21,6 +21,39 @@
 
 ---
 
+## [0.4.0] - 2026-06-20
+
+Serde, the exhaustion contract, and the feature freeze. This release completes the
+public surface: a defined non-panicking error for symbol-space exhaustion,
+optional `serde` for `Symbol`, and a declaration that the API is now frozen ahead
+of 1.0. No breaking changes — everything here is additive.
+
+### Added
+
+- `InternError` — a typed, `#[non_exhaustive]` error implementing
+  `core::error::Error` (zero dependencies, `no_std`). Its `SymbolSpaceExhausted`
+  variant is the defined outcome when the symbol space is full.
+- `Interner::try_intern` and `ConcurrentInterner::try_intern` — the fallible
+  interning path: identical to `intern` but returning
+  `Err(InternError::SymbolSpaceExhausted)` for a new string at the symbol-space
+  bound rather than saturating. Property-tested at the boundary.
+- `Symbol::from_u32` — reconstruct a symbol from a raw id (the inverse of
+  `as_u32`), returning `None` for `0`.
+- `serde` support for `Symbol` behind the `serde` feature: it serializes
+  transparently as its integer id and deserializes back, rejecting `0`.
+  Round-trip property-tested.
+
+### Changed
+
+- `Interner::intern` and `ConcurrentInterner::intern` now document their behaviour
+  at the symbol-space bound: they saturate at the highest symbol rather than
+  panic. Behaviour below the bound — every realistic workload — is unchanged.
+- The public API is declared **frozen**: `docs/API.md` records the complete 1.0
+  surface and the SemVer promise. No public API will be added or changed before
+  1.0.0, which will mark it stable.
+
+---
+
 ## [0.3.0] - 2026-06-20
 
 The concurrent interner. `ConcurrentInterner` lets many threads intern into one
@@ -101,7 +134,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/intern-lang/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jamesgober/intern-lang/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jamesgober/intern-lang/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamesgober/intern-lang/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamesgober/intern-lang/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamesgober/intern-lang/releases/tag/v0.1.0

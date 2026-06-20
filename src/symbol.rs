@@ -35,10 +35,49 @@ use core::num::NonZeroU32;
 /// let copy = a;
 /// assert_eq!(copy, a);
 /// ```
+///
+/// # Serialization
+///
+/// With the `serde` feature enabled, `Symbol` serializes transparently as its raw
+/// integer id (the same value [`as_u32`](Symbol::as_u32) returns) and
+/// deserializes back, rejecting `0`. The id is only meaningful with the interner
+/// that issued it, so persist symbols alongside the interner that produced them.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Symbol(NonZeroU32);
 
 impl Symbol {
+    /// Reconstructs a symbol from a raw 1-based id, or `None` if `id` is `0`.
+    ///
+    /// This is the inverse of [`as_u32`](Symbol::as_u32), for rebuilding a symbol
+    /// from an id stored elsewhere (a file, a wire message, an external table).
+    /// It only rebuilds the handle; whether the id names anything is decided when
+    /// you [`resolve`](crate::Interner::resolve) it against an interner, which
+    /// returns `None` for an out-of-range id. A symbol is only meaningful with the
+    /// interner that issued it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use intern_lang::{Interner, Symbol};
+    ///
+    /// let mut interner = Interner::new();
+    /// let sym = interner.intern("persisted");
+    ///
+    /// // Round-trip a symbol through its raw id.
+    /// let rebuilt = Symbol::from_u32(sym.as_u32()).unwrap();
+    /// assert_eq!(rebuilt, sym);
+    /// assert_eq!(interner.resolve(rebuilt), Some("persisted"));
+    ///
+    /// // Zero is never a valid symbol id.
+    /// assert_eq!(Symbol::from_u32(0), None);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn from_u32(id: u32) -> Option<Self> {
+        NonZeroU32::new(id).map(Self)
+    }
+
     /// Builds a symbol from a 1-based id.
     ///
     /// The interner only ever calls this with `id >= 1` (ids are assigned

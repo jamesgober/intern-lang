@@ -5,6 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use crate::error::InternError;
 use crate::symbol::Symbol;
 
 /// Initial number of slots in the dedup index. A power of two so the hash maps to
@@ -102,6 +103,12 @@ pub struct Interner {
     table: Vec<Slot>,
     /// `table.len() - 1`, for mapping a hash to a slot with a single `&`.
     mask: usize,
+    /// Size of the symbol space: the most distinct strings this interner will
+    /// issue symbols for. Always `u32::MAX` in normal use — the constructors set
+    /// it there and nothing lowers it — so it is unreachable before memory runs
+    /// out. It exists so [`try_intern`](Interner::try_intern) has a defined,
+    /// testable exhaustion boundary.
+    max_symbols: u32,
 }
 
 impl Interner {
@@ -126,6 +133,7 @@ impl Interner {
             spans: Vec::new(),
             table: Vec::new(),
             mask: 0,
+            max_symbols: u32::MAX,
         }
     }
 
@@ -180,12 +188,72 @@ impl Interner {
     /// assert_ne!(a, c);            // distinct strings, distinct symbols
     /// assert_eq!(interner.resolve(a), Some("while"));
     /// ```
+    ///
+    /// # Symbol-space bound
+    ///
+    /// An interner issues at most `u32::MAX` distinct symbols. `intern` is the
+    /// infallible path for the overwhelming common case where that bound is never
+    /// approached; at the bound it saturates — returning the highest symbol
+    /// without adding the string — rather than panicking. Use
+    /// [`try_intern`](Interner::try_intern) when you need the exhaustion reported
+    /// as a [`Result`] instead.
     pub fn intern(&mut self, s: &str) -> Symbol {
         let hash = hash_bytes(s.as_bytes());
         if let Some(symbol) = self.lookup(s, hash) {
             return symbol;
         }
+        if self.is_full() {
+            // Symbol space exhausted: saturate at the highest symbol rather than
+            // panic. Unreachable in normal use (the bound is `u32::MAX`).
+            return Symbol::from_raw(self.max_symbols);
+        }
         self.insert_new(s, hash)
+    }
+
+    /// Interns `s`, returning its [`Symbol`], or an error if the symbol space is
+    /// exhausted.
+    ///
+    /// This is the fallible counterpart to [`intern`](Interner::intern). It
+    /// behaves identically — deduplicating, allocation-free on a repeat hit —
+    /// except that interning a *new* string when the symbol space is full returns
+    /// [`InternError::SymbolSpaceExhausted`] instead of saturating. Interning a
+    /// string that already exists never fails, even at the bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InternError::SymbolSpaceExhausted`] when `s` is new and the
+    /// interner has already issued all of its symbols. This is unreachable for any
+    /// input that fits in memory; the method exists so a caller that must account
+    /// for the boundary can do so explicitly.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use intern_lang::Interner;
+    ///
+    /// let mut interner = Interner::new();
+    /// let sym = interner.try_intern("identifier").expect("space available");
+    /// assert_eq!(interner.resolve(sym), Some("identifier"));
+    ///
+    /// // Re-interning the same string yields the same symbol and never errors.
+    /// assert_eq!(interner.try_intern("identifier"), Ok(sym));
+    /// ```
+    pub fn try_intern(&mut self, s: &str) -> Result<Symbol, InternError> {
+        let hash = hash_bytes(s.as_bytes());
+        if let Some(symbol) = self.lookup(s, hash) {
+            return Ok(symbol);
+        }
+        if self.is_full() {
+            return Err(InternError::SymbolSpaceExhausted);
+        }
+        Ok(self.insert_new(s, hash))
+    }
+
+    /// Whether the symbol space is exhausted — no new string can be assigned a
+    /// symbol.
+    #[inline]
+    fn is_full(&self) -> bool {
+        self.spans.len() >= self.max_symbols as usize
     }
 
     /// Looks up `s` without interning it, returning its [`Symbol`] if it is
@@ -497,6 +565,12 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    // Unwrapping is acceptable in tests where an error cannot be meaningfully
+    // handled and a failure should fail the test.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
@@ -617,6 +691,57 @@ mod tests {
             assert!(cap.is_power_of_two());
             assert!(cap >= INITIAL_CAPACITY);
             assert!(cap * 3 >= n.saturating_mul(4));
+        }
+    }
+
+    #[test]
+    fn test_try_intern_succeeds_below_the_bound() {
+        let mut interner = Interner::new();
+        let sym = interner.try_intern("ok").expect("space available");
+        assert_eq!(interner.resolve(sym), Some("ok"));
+        assert_eq!(interner.try_intern("ok"), Ok(sym));
+    }
+
+    #[test]
+    fn test_intern_saturates_at_the_bound() {
+        // Lower the symbol-space bound so the boundary is reachable in a test.
+        let mut interner = Interner::new();
+        interner.max_symbols = 2;
+        let a = interner.intern("a");
+        let b = interner.intern("b");
+        // The space is now full; a new string saturates to the highest symbol
+        // and is not stored.
+        let saturated = interner.intern("c");
+        assert_eq!(saturated.as_u32(), 2);
+        assert_eq!(interner.len(), 2);
+        // Existing strings still resolve and dedup correctly.
+        assert_eq!(interner.resolve(a), Some("a"));
+        assert_eq!(interner.intern("b"), b);
+    }
+
+    proptest! {
+        /// At the symbol-space boundary, `try_intern` reports exhaustion for a new
+        /// string while still accepting strings it already holds.
+        #[test]
+        fn try_intern_reports_exhaustion_at_the_boundary(limit in 1u32..=64) {
+            let mut interner = Interner::new();
+            interner.max_symbols = limit;
+
+            // Fill exactly to the bound with distinct strings.
+            for i in 0..limit {
+                let s = alloc::format!("s{i}");
+                prop_assert!(interner.try_intern(&s).is_ok());
+            }
+            prop_assert_eq!(interner.len(), limit as usize);
+
+            // A new distinct string is now rejected with the defined error...
+            prop_assert_eq!(
+                interner.try_intern("overflow"),
+                Err(InternError::SymbolSpaceExhausted)
+            );
+            // ...but an already-interned string still succeeds (dedup, no growth).
+            prop_assert!(interner.try_intern("s0").is_ok());
+            prop_assert_eq!(interner.len(), limit as usize);
         }
     }
 }

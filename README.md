@@ -37,7 +37,7 @@
 
 ```toml
 [dependencies]
-intern-lang = "0.3"
+intern-lang = "0.4"
 ```
 
 <br>
@@ -91,8 +91,11 @@ assert_eq!(interner.len(), 4); // let, x, =, +
 - **Thread-safe variant.** `ConcurrentInterner` lets many threads intern into one
   shared symbol space; the warm read path runs concurrently and racing threads
   never mint a duplicate symbol. Both interners share the `Lookup` read trait.
-- **`no_std`.** Relies only on `alloc`; the default `std` feature is additive. No
-  runtime dependencies beyond an optional `serde` (planned).
+- **Fallible path.** `try_intern` returns a typed `InternError` at the symbol-space
+  bound instead of panicking, for callers that must account for it explicitly.
+- **`no_std` + optional serde.** Relies only on `alloc`; the default `std` feature
+  is additive. Behind the `serde` feature, `Symbol` serializes transparently as
+  its integer id. No runtime dependencies beyond optional `serde`.
 - **`#![forbid(unsafe_code)]`.** The contiguous store is implemented without any
   `unsafe`.
 
@@ -149,20 +152,23 @@ assert_eq!(interner.len(), 1);
 
 For the complete reference with examples, see [`docs/API.md`](./docs/API.md).
 
-- [`Symbol`](./docs/API.md#symbol) — four-byte `Copy` handle to an interned string.
+- [`Symbol`](./docs/API.md#symbol) — four-byte `Copy` handle: `as_u32`, `from_u32`.
 - [`Interner`](./docs/API.md#interner) — single-threaded interner: `intern`,
-  `get`, `resolve`, `len`, `with_capacity`.
+  `try_intern`, `get`, `resolve`, `resolve_with`, `len`, `with_capacity`.
 - [`ConcurrentInterner`](./docs/API.md#concurrentinterner) — thread-safe interner
   sharing one symbol space (requires the `std` feature).
 - [`Lookup`](./docs/API.md#lookup) — read-side trait both interners implement.
+- [`InternError`](./docs/API.md#internerror) — the typed exhaustion error.
 
 <br>
 
 ## Status
 
-`v0.3.0` ships the core interner, the symbol, and the thread-safe
-`ConcurrentInterner`. Optional `serde` for `Symbol` and the defined
-symbol-space-exhaustion result land across the remaining 0.x series per the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>; the public surface freezes at <code>1.0.0</code>.
+`v0.4.0` completes the public surface — the core interner, the symbol, the
+thread-safe `ConcurrentInterner`, the fallible `try_intern`/`InternError`
+contract, and optional `serde` for `Symbol` — and **declares it frozen**. No
+public API will be added or changed before <code>1.0.0</code>, which marks it
+stable; see <a href="./docs/API.md#stability">Stability</a> and the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
 
 <hr>
 <br>

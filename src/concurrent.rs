@@ -4,6 +4,7 @@ use alloc::string::{String, ToString};
 use core::fmt;
 use std::sync::{PoisonError, RwLock};
 
+use crate::error::InternError;
 use crate::interner::Interner;
 use crate::lookup::Lookup;
 use crate::symbol::Symbol;
@@ -138,6 +139,40 @@ impl ConcurrentInterner {
         // and write returns the existing symbol rather than a duplicate.
         let mut guard = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         guard.intern(s)
+    }
+
+    /// Interns `s` from a shared reference, returning its [`Symbol`], or an error
+    /// if the symbol space is exhausted.
+    ///
+    /// The fallible counterpart to [`intern`](Self::intern), with the same
+    /// two-step locking. A string already present is returned under the read lock
+    /// and never errors; only a new string at the symbol-space bound returns
+    /// [`InternError::SymbolSpaceExhausted`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InternError::SymbolSpaceExhausted`] when `s` is new and the
+    /// interner has issued all of its symbols — unreachable for any input that
+    /// fits in memory.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use intern_lang::ConcurrentInterner;
+    ///
+    /// let interner = ConcurrentInterner::new();
+    /// let sym = interner.try_intern("name").expect("space available");
+    /// assert_eq!(interner.try_intern("name"), Ok(sym));
+    /// ```
+    pub fn try_intern(&self, s: &str) -> Result<Symbol, InternError> {
+        {
+            let guard = self.inner.read().unwrap_or_else(PoisonError::into_inner);
+            if let Some(symbol) = guard.get(s) {
+                return Ok(symbol);
+            }
+        }
+        let mut guard = self.inner.write().unwrap_or_else(PoisonError::into_inner);
+        guard.try_intern(s)
     }
 
     /// Returns the symbol for `s` if it has already been interned, without
