@@ -21,6 +21,23 @@
 
 ---
 
+## [1.0.0] - 2026-06-20
+
+API freeze. The public surface is declared stable and frozen under Semantic
+Versioning until 2.0. There are no code changes from `0.4.0`; this release marks
+the contract.
+
+### Changed
+
+- `docs/API.md` is marked **stable**: the documented surface — `Symbol`,
+  `Interner`, `ConcurrentInterner`, `Lookup`, `InternError` — is frozen, and no
+  breaking change will be made without a major version bump. `InternError` remains
+  `#[non_exhaustive]` and SemVer's additive rule still permits new items.
+- The full property-test and benchmark suite is verified green on Linux, macOS,
+  and Windows against stable and MSRV 1.85.
+
+---
+
 ## [0.4.0] - 2026-06-20
 
 Serde, the exhaustion contract, and the feature freeze. This release completes the
@@ -134,7 +151,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/intern-lang/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jamesgober/intern-lang/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/jamesgober/intern-lang/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/jamesgober/intern-lang/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamesgober/intern-lang/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamesgober/intern-lang/compare/v0.1.0...v0.2.0

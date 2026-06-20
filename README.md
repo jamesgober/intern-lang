@@ -26,7 +26,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition).
     </p>
     <blockquote>
-        <strong>Status: pre-1.0, in active development.</strong> The public API is being designed across the 0.x series and frozen at <code>1.0.0</code>. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a>.
+        <strong>Status: stable (1.0).</strong> The public API is frozen under SemVer until 2.0. See <a href="./docs/API.md#stability"><code>Stability</code></a> and <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a>.
     </blockquote>
 </div>
 
@@ -37,7 +37,7 @@
 
 ```toml
 [dependencies]
-intern-lang = "0.4"
+intern-lang = "1"
 ```
 
 <br>
@@ -164,11 +164,10 @@ For the complete reference with examples, see [`docs/API.md`](./docs/API.md).
 
 ## Status
 
-`v0.4.0` completes the public surface — the core interner, the symbol, the
+**`v1.0.0` — stable.** The public surface — the core interner, the symbol, the
 thread-safe `ConcurrentInterner`, the fallible `try_intern`/`InternError`
-contract, and optional `serde` for `Symbol` — and **declares it frozen**. No
-public API will be added or changed before <code>1.0.0</code>, which marks it
-stable; see <a href="./docs/API.md#stability">Stability</a> and the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
+contract, and optional `serde` for `Symbol` — is frozen under SemVer until 2.0. No
+breaking change will be made without a major bump; see <a href="./docs/API.md#stability">Stability</a>.
 
 <hr>
 <br>

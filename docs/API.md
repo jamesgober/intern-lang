@@ -1,7 +1,7 @@
 # intern-lang &mdash; API Reference
 
 > Complete reference for every public item in `intern-lang`, with examples.
-> **Status: feature-frozen.** As of v0.4.0 this is the complete public surface; no items will be added or changed before `1.0.0`, which will mark it stable. See [Stability](#stability) and [`dev/ROADMAP.md`](../dev/ROADMAP.md).
+> **Status: stable (1.0).** This surface is frozen under [Semantic Versioning](https://semver.org/) until 2.0 — no breaking change without a major bump. See [Stability](#stability).
 
 ## Table of Contents
 
@@ -717,19 +717,19 @@ returns [`InternError::SymbolSpaceExhausted`](#internerror).
 
 ## Stability
 
-As of **v0.4.0 the public surface is feature-frozen**: the items documented above
-are the complete set, and no public item will be added, removed, or changed in
-signature or documented behaviour before `1.0.0`. The `1.0.0` release will mark
-this surface stable under [Semantic Versioning](https://semver.org/) — after it,
-any breaking change requires a major version bump.
+**As of 1.0.0 this surface is stable and frozen under
+[Semantic Versioning](https://semver.org/) until 2.0.** Every item documented
+above — its name, signature, and documented behaviour — is part of the contract:
+no breaking change will be made without a major version bump. Patch and minor
+releases may fix bugs, improve performance, sharpen documentation, and *add* new
+items, but will never remove or alter an existing one.
 
-Two deliberate extension points are reserved so the freeze does not preclude
-growth:
+Two deliberate extension points keep the freeze from precluding growth:
 
 - `InternError` is `#[non_exhaustive]`, so new failure modes can be added as
   variants without a breaking change. Always include a wildcard `match` arm.
 - New methods, feature flags, and trait implementations may still be *added* under
-  SemVer's additive rule; nothing in the table above will be taken away or altered.
+  SemVer's additive rule; nothing in this reference will be taken away or altered.
 
 The MSRV is **1.85**. An MSRV increase is treated as a minor, not a patch, change.
 

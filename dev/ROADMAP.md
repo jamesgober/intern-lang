@@ -25,9 +25,9 @@ grows — symbol stability across growth is the invariant everything above depen
 on, so it is proven here rather than after the easy `intern`/`resolve` surface.
 
 Exit criteria:
-- [ ] Every public item has rustdoc + a runnable example.
-- [ ] Dedup, distinctness, and `resolve(intern(s)) == s` round-trip property-tested against a `HashMap` reference interner.
-- [ ] Symbol stability across many interns (forcing store growth) property-tested.
+- [x] Every public item has rustdoc + a runnable example.
+- [x] Dedup, distinctness, and `resolve(intern(s)) == s` round-trip property-tested against a `HashMap` reference interner.
+- [x] Symbol stability across many interns (forcing store growth) property-tested.
 
 ---
 
@@ -38,8 +38,8 @@ behind the same trait seam as the single-threaded one so it is additive, not a
 rewrite. Contention behaviour benchmarked, not assumed.
 
 Exit criteria:
-- [ ] Concurrent interning is correct under contention (no duplicate symbols for the same string across threads), proven not assumed.
-- [ ] The single-threaded hot path is not taxed by the concurrent backend's existence.
+- [x] Concurrent interning is correct under contention (no duplicate symbols for the same string across threads), proven not assumed.
+- [x] The single-threaded hot path is not taxed by the concurrent backend's existence.
 
 ---
 
@@ -49,9 +49,9 @@ Optional `serde` for `Symbol`, a defined symbol-space-exhaustion result, and a
 declared frozen public surface.
 
 Exit criteria:
-- [ ] Exhaustion returns a defined error, property-tested at the boundary.
-- [ ] `serde` round-trips `Symbol` under the feature.
-- [ ] API surface documented as frozen in `docs/API.md`.
+- [x] Exhaustion returns a defined error, property-tested at the boundary.
+- [x] `serde` round-trips `Symbol` under the feature.
+- [x] API surface documented as frozen in `docs/API.md`.
 
 ---
 
@@ -61,5 +61,5 @@ The interner/symbol surface is stable and frozen until 2.0. No new public API,
 only documentation, tests, and internal optimisation.
 
 Exit criteria:
-- [ ] `docs/API.md` marked stable; SemVer promise recorded.
-- [ ] Full property-test and benchmark suite green on all three platforms.
+- [x] `docs/API.md` marked stable; SemVer promise recorded.
+- [x] Full property-test and benchmark suite green on all three platforms.
