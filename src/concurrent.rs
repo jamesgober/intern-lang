@@ -125,6 +125,14 @@ impl ConcurrentInterner {
     /// let b = interner.intern("shared");
     /// assert_eq!(a, b);
     /// ```
+    ///
+    /// # Symbol-space bound
+    ///
+    /// At the `u32::MAX` bound this behaves exactly like
+    /// [`Interner::intern`](crate::Interner::intern) (see its "Symbol-space
+    /// bound" section): a new string is not stored and the highest symbol, which
+    /// names a *different* string, is returned without panicking. Use
+    /// [`try_intern`](Self::try_intern) to have the bound reported instead.
     pub fn intern(&self, s: &str) -> Symbol {
         // Fast path: a string that already exists is found under a shared lock,
         // so concurrent readers do not block one another.

@@ -103,22 +103,27 @@ assert_eq!(interner.len(), 4); // let, x, =, +
 
 ## Performance
 
-Resolution is a side-table index plus a slice — measured at roughly **1.1 ns per
+Resolution is a side-table index plus a slice — measured at roughly **1.4 ns per
 `resolve`** (Criterion mean, Windows x86_64, Rust stable, on the development
 machine). Interning an already-seen string is allocation-free: a hash over the
 bytes, an open-addressing probe, and one byte comparison to confirm the hit. The
-numbers below are a v0.x baseline, tracked over time rather than advertised as
-final:
+hash ends in a full-width mix, so structured keys (numbered identifiers, long
+shared prefixes) spread across the index; probe counts are pinned by tests at
+100k keys. Per-string means from the 1024-string `intern_*` benches (v1.0.1):
 
 | Operation | Mean |
 |---|---|
-| `resolve` (id → `&str`) | ~1.1 ns |
-| `intern` (repeat hit, no allocation) | ~0.23 µs |
-| `intern` (new string, amortised growth) | ~0.62 µs |
+| `resolve` (id → `&str`) | ~1.4 ns |
+| `intern` (repeat hit, no allocation) | ~16 ns |
+| `intern` (new string, amortised growth) | ~27 ns |
 
-Run them yourself with `cargo bench`. The warm read path scales across threads:
-at 8 threads the `ConcurrentInterner` sustains roughly 4× the single-thread intern
-throughput, since hits are served under a shared read lock.
+At scale (`scale_*` benches, 1M distinct strings): interning into a fresh
+interner runs at roughly 7–16 M strings/s and the warm hit path at 9–17 M
+strings/s, depending on the corpus shape. Run them yourself with `cargo bench`.
+The warm read path scales across threads, since hits are served under a shared
+read lock: at 8 threads the `ConcurrentInterner` sustains roughly 2.3× the
+single-thread throughput in the `concurrent_intern_existing` bench, which
+includes the cost of spawning the threads on every iteration.
 
 <br>
 
@@ -164,7 +169,7 @@ For the complete reference with examples, see [`docs/API.md`](./docs/API.md).
 
 ## Status
 
-**`v1.0.0` — stable.** The public surface — the core interner, the symbol, the
+**`v1.0.1` — stable.** The public surface — the core interner, the symbol, the
 thread-safe `ConcurrentInterner`, the fallible `try_intern`/`InternError`
 contract, and optional `serde` for `Symbol` — is frozen under SemVer until 2.0. No
 breaking change will be made without a major bump; see <a href="./docs/API.md#stability">Stability</a>.

@@ -21,6 +21,73 @@
 
 ---
 
+## [1.0.1] - 2026-10-08
+
+A patch release on the frozen 1.0 surface: no public item is added, removed, or
+changed. It fixes a hash-index clustering defect that made structured keys
+quadratic to intern, and corrects the symbol-space-bound documentation. See the
+[release notes](docs/release/v1.0.1.md) for the full before/after benchmark
+numbers.
+
+### Fixed
+
+- **Structured keys no longer cluster in the dedup index (ledger H03).** The
+  1.0.0 hash was an FxHash-style multiply with no finalizer, and the home slot
+  was taken from its low bits. A multiply carries information only upward, so
+  those bits depended on just the first two or three bytes and the length of a
+  short string. Numbered identifiers (`t0000..t7999`, `var0000..`), long shared
+  prefixes, and the crate's own benchmark corpus (`identifier_number_{i}`)
+  collapsed onto a handful of slots, and linear probing went quadratic: 10,608
+  average probes per key for `identifier_number_{i}` at 100k keys, and 114 s to
+  intern one million of them. The hash now ends in a xor-shift / multiply /
+  xor-shift avalanche, so the slot index depends on every byte. The same
+  1M-string workload takes 134 ms, and every tested corpus averages 1.3–1.6
+  probes per key, matching the linear-probing expectation for the load factor.
+- **`intern` documentation at the symbol-space bound (ledger M29).** The
+  `Interner` docs still said a non-panicking exhaustion result was "scheduled for
+  a later release", although `try_intern` has existed since 0.4.0. The rustdoc
+  and [`docs/API.md`](docs/API.md#internerintern) now state exactly what `intern`
+  does once all `u32::MAX` symbols are issued: it returns the highest symbol,
+  which names the *last string interned*, not the new one. That behaviour is
+  unchanged in 1.x because fixing it would lower the frozen capacity; it is
+  recorded for 2.0 in [`dev/ROADMAP.md`](dev/ROADMAP.md). A test now pins it.
+
+### Changed
+
+- Short strings are hashed with fixed-width overlapping reads instead of
+  copying a variable-length tail into a zeroed buffer, and the probe loop
+  compares bytes rather than `&str` slices. Together these more than pay for
+  the finalizer: on a pseudo-random short-identifier corpus where 1.0.0 did not
+  cluster, hits are 11.6% faster and misses 50.9% faster.
+- `tests/concurrent.rs` is compiled only with the `std` feature and the bench
+  target declares `required-features = ["std"]`, so
+  `cargo clippy --all-targets --no-default-features` builds again (both import
+  the `std`-only `ConcurrentInterner`). No library code changed for this.
+- Hash values and therefore the internal slot layout differ from 1.0.0. Symbol
+  ids are unaffected: they are still assigned sequentially in interning order.
+- The README performance table is re-measured: ~16 ns per repeat-hit `intern`
+  and ~27 ns per new-string `intern`, replacing ~0.23 µs and ~0.62 µs, which
+  measured the clustering defect rather than the interner. The 8-thread
+  `ConcurrentInterner` figure is corrected from ~4× to ~2.3× single-thread
+  throughput. The ratio fell because the single-thread path got much faster,
+  so per-iteration thread-spawn cost now dominates the bench.
+
+### Added (tests and benches only)
+
+- A test-only probe counter, plus tests that bound average and worst-case probe
+  counts (hits and misses) for 100k numbered, zero-padded, common-prefix, and
+  common-suffix identifiers; the bench corpus; every one- and two-byte ASCII
+  string; and 1 KiB strings. Also added: the regression test
+  `h03_numbered_identifiers_do_not_cluster`, a property test over arbitrary
+  `{prefix}{counter}{suffix}` families, a test that every byte position reaches
+  the hash at lengths 0–24, and a full-width collision check on the structured
+  corpora.
+- Criterion `scale_intern_new` / `scale_intern_existing` groups at 10k, 100k,
+  and 1M distinct strings over numbered, prefixed, bench-corpus, and
+  pseudo-random corpora, and a `short_identifiers` hit/miss group.
+
+---
+
 ## [1.0.0] - 2026-06-20
 
 API freeze. The public surface is declared stable and frozen under Semantic
@@ -151,7 +218,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/intern-lang/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/jamesgober/intern-lang/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/jamesgober/intern-lang/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/jamesgober/intern-lang/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/jamesgober/intern-lang/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamesgober/intern-lang/compare/v0.2.0...v0.3.0

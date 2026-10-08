@@ -56,21 +56,26 @@ impl Slot {
 /// index into a side table of `(start, len)` spans into that buffer, so a symbol
 /// is four bytes regardless of how long its string is. Deduplication runs through
 /// an open-addressing hash index that stores symbol ids, not strings, so it adds
-/// no second copy of the bytes. The buffer only ever appends and the span table
-/// only ever grows, so a symbol issued early keeps resolving to the same string
-/// for the interner's whole lifetime, including after either structure
-/// reallocates — [`resolve`](Interner::resolve) recomputes the slice from the
-/// current buffer on each call rather than holding a borrowed pointer, so growth
-/// can never dangle a previously issued symbol.
+/// no second copy of the bytes. Its home slots come from a fully mixed hash, so
+/// structured keys — numbered identifiers, long shared prefixes or suffixes —
+/// spread across the index instead of piling onto a few slots.
+///
+/// The buffer only ever appends and the span table only ever grows, so a symbol
+/// issued early keeps resolving to the same string for the interner's whole
+/// lifetime, including after either structure reallocates —
+/// [`resolve`](Interner::resolve) recomputes the slice from the current buffer on
+/// each call rather than holding a borrowed pointer, so growth can never dangle a
+/// previously issued symbol.
 ///
 /// # Capacity
 ///
 /// Symbol ids span `1..=u32::MAX`, so an interner holds up to `u32::MAX` distinct
 /// strings. Reaching that bound requires interning over four billion *distinct*
-/// strings, which exhausts memory long before the id space — the span table alone
-/// would need tens of gigabytes. A defined, non-panicking exhaustion result is
-/// scheduled for a later release; until then the boundary is unreachable for any
-/// input that fits in memory.
+/// strings: the span table alone would need about 64 GiB and the dedup index tens
+/// of gigabytes more, so in practice memory runs out first. The bound is still
+/// defined and non-panicking: [`try_intern`](Interner::try_intern) reports it as
+/// [`InternError::SymbolSpaceExhausted`], and [`intern`](Interner::intern)
+/// saturates exactly as its "Symbol-space bound" section describes.
 ///
 /// # Examples
 ///
@@ -193,10 +198,23 @@ impl Interner {
     ///
     /// An interner issues at most `u32::MAX` distinct symbols. `intern` is the
     /// infallible path for the overwhelming common case where that bound is never
-    /// approached; at the bound it saturates — returning the highest symbol
-    /// without adding the string — rather than panicking. Use
-    /// [`try_intern`](Interner::try_intern) when you need the exhaustion reported
-    /// as a [`Result`] instead.
+    /// approached. Exactly what it does once all `u32::MAX` symbols are issued:
+    ///
+    /// - A string that is **already interned** still returns its own symbol, as
+    ///   always.
+    /// - A **new** string is *not* stored, and `intern` returns the highest
+    ///   symbol, id `u32::MAX`, without panicking. That symbol already belongs to
+    ///   the last string interned before the space filled, so the returned value
+    ///   compares equal to that other string's symbol and
+    ///   [`resolve`](Interner::resolve) yields that other string, not `s`. The
+    ///   round-trip and distinctness guarantees do not hold for that one return
+    ///   value; the interner itself is unchanged and stays consistent.
+    ///
+    /// No symbol value can be reserved to mean "no string" without lowering the
+    /// documented `u32::MAX` capacity, so 1.x keeps this saturating behaviour; a
+    /// cleaner contract is planned for 2.0. If a workload can plausibly approach
+    /// the bound, call [`try_intern`](Interner::try_intern), which reports it as
+    /// [`InternError::SymbolSpaceExhausted`] instead.
     pub fn intern(&mut self, s: &str) -> Symbol {
         let hash = hash_bytes(s.as_bytes());
         if let Some(symbol) = self.lookup(s, hash) {
@@ -204,7 +222,10 @@ impl Interner {
         }
         if self.is_full() {
             // Symbol space exhausted: saturate at the highest symbol rather than
-            // panic. Unreachable in normal use (the bound is `u32::MAX`).
+            // panic. That id names the last string interned, not `s`; the doc
+            // comment above states this exactly, and `try_intern` is the
+            // reporting path. Memory runs out before this in practice (the bound
+            // is `u32::MAX`), but the behaviour is defined and tested.
             return Symbol::from_raw(self.max_symbols);
         }
         self.insert_new(s, hash)
@@ -380,14 +401,14 @@ impl Interner {
         if self.table.is_empty() {
             return None;
         }
-        let fingerprint = hash as u32;
-        let mut idx = (hash as usize) & self.mask;
+        let fp = fingerprint(hash);
+        let mut idx = slot_index(hash, self.mask);
         loop {
             let slot = self.table[idx];
             if slot.is_empty() {
                 return None;
             }
-            if slot.hash == fingerprint && self.span_str(slot.id) == s {
+            if slot.hash == fp && self.span_bytes(slot.id) == s.as_bytes() {
                 return Some(Symbol::from_raw(slot.id));
             }
             idx = (idx + 1) & self.mask;
@@ -409,21 +430,22 @@ impl Interner {
 
         // The 1-based id equals the new length of the span table.
         let id = id_for(self.spans.len());
-        self.insert_slot(Slot {
-            hash: hash as u32,
-            id,
-        });
+        self.insert_slot(hash, id);
         Symbol::from_raw(id)
     }
 
-    /// Places `slot` at its first empty probe position. The table is guaranteed to
-    /// have room because [`reserve_one`](Interner::reserve_one) ran first.
-    fn insert_slot(&mut self, slot: Slot) {
-        let mut idx = (slot.hash as usize) & self.mask;
+    /// Records symbol `id` (whose string hashed to `hash`) at its first empty
+    /// probe position. The table is guaranteed to have room because
+    /// [`reserve_one`](Interner::reserve_one) ran first.
+    fn insert_slot(&mut self, hash: u64, id: u32) {
+        let mut idx = slot_index(hash, self.mask);
         while !self.table[idx].is_empty() {
             idx = (idx + 1) & self.mask;
         }
-        self.table[idx] = slot;
+        self.table[idx] = Slot {
+            hash: fingerprint(hash),
+            id,
+        };
     }
 
     /// Ensures the dedup index has room for one more entry under a 0.75 load
@@ -449,12 +471,12 @@ impl Interner {
             let s = &self.buf[span.start..span.start + span.len];
             let hash = hash_bytes(s.as_bytes());
             let id = id_for(i + 1);
-            let mut idx = (hash as usize) & mask;
+            let mut idx = slot_index(hash, mask);
             while !table[idx].is_empty() {
                 idx = (idx + 1) & mask;
             }
             table[idx] = Slot {
-                hash: hash as u32,
+                hash: fingerprint(hash),
                 id,
             };
         }
@@ -463,12 +485,41 @@ impl Interner {
         self.mask = mask;
     }
 
-    /// Returns the string for a 1-based symbol id. Only called with ids the
-    /// interner issued, so the span always exists.
+    /// Returns the stored bytes for a 1-based symbol id. Only called with ids the
+    /// interner issued, so the span always exists. The probe compares bytes, not
+    /// `&str`, so it skips the char-boundary checks a `str` slice would repeat on
+    /// every candidate; equal bytes are equal strings.
     #[inline]
-    fn span_str(&self, id: u32) -> &str {
+    fn span_bytes(&self, id: u32) -> &[u8] {
         let span = self.spans[id as usize - 1];
-        &self.buf[span.start..span.start + span.len]
+        &self.buf.as_bytes()[span.start..span.start + span.len]
+    }
+
+    /// Test-only probe counter: the number of slots [`lookup`](Interner::lookup)
+    /// inspects to find `s`, or to prove it absent. It re-walks the probe sequence
+    /// instead of instrumenting the real one, so the hot path carries no counter.
+    ///
+    /// For a present string this equals the probes its placement in the *current*
+    /// table cost: the index never deletes, and a resize re-inserts every key in
+    /// id order, so nothing moves a key after it is placed.
+    #[cfg(test)]
+    fn probe_count(&self, s: &str) -> usize {
+        if self.table.is_empty() {
+            return 0;
+        }
+        let hash = hash_bytes(s.as_bytes());
+        let mut idx = slot_index(hash, self.mask);
+        let mut probes = 1;
+        loop {
+            let slot = self.table[idx];
+            if slot.is_empty()
+                || (slot.hash == fingerprint(hash) && self.span_bytes(slot.id) == s.as_bytes())
+            {
+                return probes;
+            }
+            idx = (idx + 1) & self.mask;
+            probes += 1;
+        }
     }
 }
 
@@ -532,35 +583,131 @@ fn table_capacity_for(strings: usize) -> usize {
     target.max(INITIAL_CAPACITY).next_power_of_two()
 }
 
-/// Hashes `bytes` with an FxHash-style multiply-rotate over 64-bit words.
+/// Maps a hash to its home slot in a table of `mask + 1` slots.
 ///
-/// The string length seeds the state so that strings differing only in trailing
-/// content within a word boundary (for example `"ab"` versus `"ab\0"`) do not
-/// collide on the fast fingerprint. This is a non-cryptographic hash chosen for
-/// throughput on short identifiers; correctness never depends on it, since the
-/// dedup index always confirms a candidate with a full byte comparison.
+/// Uses the low bits. That is only sound because [`hash_bytes`] ends in a
+/// full-width avalanche ([`finish`]): every low bit depends on every input byte
+/// (see H03 there).
+#[inline]
+fn slot_index(hash: u64, mask: usize) -> usize {
+    (hash as usize) & mask
+}
+
+/// The 32-bit fingerprint cached in a [`Slot`] to reject non-matches without
+/// touching the backing buffer.
+///
+/// Taken from the *high* half, which the slot index (the low bits, for any table
+/// under 2^32 slots) does not read directly: two keys that share a home slot
+/// still almost never share a fingerprint, so a probe through a collision run
+/// rarely falls through to a byte comparison.
+#[inline]
+fn fingerprint(hash: u64) -> u32 {
+    (hash >> 32) as u32
+}
+
+/// Hashes `bytes` to a well-mixed 64-bit value for the dedup index.
+///
+/// The body is an FxHash-style multiply-rotate over 64-bit little-endian words,
+/// seeded with the length. Strings of up to eight bytes are packed into a single
+/// word with overlapping fixed-width reads (two `u32`s for 4..=8 bytes, three
+/// single bytes for 1..=3), and a longer string's partial last word is read as
+/// the *final eight bytes* of the string, overlapping the previous word. Every
+/// byte reaches the state through a fixed-size load, so no length-dependent copy
+/// sits on the hot path, and for a given length the packing is injective. Each
+/// round is a bijection of the state for a fixed word, so two same-length strings
+/// that differ in a single word never collide on the full 64-bit value.
+///
+/// The body alone is not fit for slot selection (H03, fixed in 1.0.1): a
+/// multiply carries information only *upward*, so the low `k` bits of the result
+/// depend only on the low `k` bits of the last word, which for a short string are
+/// its first two or three bytes and its length. Numbered identifiers such as
+/// `t0000..t7999` or `identifier_number_{i}` then share a handful of home slots
+/// and linear probing degrades to quadratic total work. [`finish`] closes this
+/// with a xor-shift / multiply / xor-shift avalanche that makes the low bits
+/// depend on the whole state.
+///
+/// This is a non-cryptographic, unkeyed hash chosen for throughput on short
+/// identifiers. Correctness never depends on it: the dedup index always confirms
+/// a candidate with a full byte comparison.
 #[inline]
 fn hash_bytes(bytes: &[u8]) -> u64 {
+    let len = bytes.len();
+    let mut hash = len as u64;
+    if len <= 8 {
+        if len > 0 {
+            hash = round(hash, small_word(bytes));
+        }
+    } else {
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in chunks.by_ref() {
+            hash = round(hash, read_u64(chunk));
+        }
+        if !chunks.remainder().is_empty() {
+            // Re-read the last eight bytes rather than copying a short tail into
+            // a zeroed buffer. `len > 8`, so the subtraction cannot underflow.
+            hash = round(hash, read_u64(&bytes[len - 8..]));
+        }
+    }
+    finish(hash)
+}
+
+/// One FxHash-style round: fold `word` into `state`.
+#[inline]
+fn round(state: u64, word: u64) -> u64 {
     const K: u64 = 0x517c_c1b7_2722_0a95;
+    (state.rotate_left(5) ^ word).wrapping_mul(K)
+}
 
-    let mut hash = bytes.len() as u64;
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in chunks.by_ref() {
-        // `chunks_exact(8)` always yields eight bytes, so the conversion holds;
-        // the fallback is dead and only keeps this free of `unwrap`.
-        let word = u64::from_le_bytes(<[u8; 8]>::try_from(chunk).unwrap_or([0; 8]));
-        hash = (hash.rotate_left(5) ^ word).wrapping_mul(K);
+/// Packs a string of 1..=8 bytes into one word using fixed-width loads only.
+///
+/// For 4..=8 bytes the first and last four bytes are read (overlapping when the
+/// length is under eight); for 1..=3 bytes the first, middle, and last byte are
+/// taken. Either way every byte lands in the word, so for a fixed length the
+/// packing is injective — the length itself is already in the hash state.
+#[inline]
+fn small_word(bytes: &[u8]) -> u64 {
+    let len = bytes.len();
+    if len >= 4 {
+        let lo = read_u32(&bytes[..4]);
+        let hi = read_u32(&bytes[len - 4..]);
+        u64::from(lo) | (u64::from(hi) << 32)
+    } else {
+        u64::from(bytes[0]) | (u64::from(bytes[len / 2]) << 8) | (u64::from(bytes[len - 1]) << 16)
     }
+}
 
-    let remainder = chunks.remainder();
-    if !remainder.is_empty() {
-        let mut tail = [0u8; 8];
-        tail[..remainder.len()].copy_from_slice(remainder);
-        let word = u64::from_le_bytes(tail);
-        hash = (hash.rotate_left(5) ^ word).wrapping_mul(K);
-    }
+/// Reads the first eight bytes of `bytes` (which holds at least eight) as a
+/// little-endian word.
+#[inline]
+fn read_u64(bytes: &[u8]) -> u64 {
+    let mut word = [0u8; 8];
+    word.copy_from_slice(&bytes[..8]);
+    u64::from_le_bytes(word)
+}
 
-    hash
+/// Reads the first four bytes of `bytes` (which holds at least four) as a
+/// little-endian word.
+#[inline]
+fn read_u32(bytes: &[u8]) -> u32 {
+    let mut word = [0u8; 4];
+    word.copy_from_slice(&bytes[..4]);
+    u32::from_le_bytes(word)
+}
+
+/// Finalizer: xor-shift, multiply, xor-shift.
+///
+/// The first shift folds the high half of the state onto the low half, so the
+/// multiply's low bits already see every state bit; the multiply then spreads
+/// each bit upward, and the last shift brings the well-mixed high bits back down
+/// into the low bits the slot index uses. Three cheap 64-bit operations, once per
+/// string rather than per word, and no 128-bit arithmetic (so 32-bit targets pay
+/// no widening-multiply penalty). The multiplier is 2^64 / φ, the usual
+/// Fibonacci-hashing constant (odd, so the multiply is a bijection).
+#[inline]
+fn finish(state: u64) -> u64 {
+    const M: u64 = 0x9e37_79b9_7f4a_7c15;
+    let h = (state ^ (state >> 32)).wrapping_mul(M);
+    h ^ (h >> 32)
 }
 
 #[cfg(test)]
@@ -710,13 +857,236 @@ mod tests {
         let a = interner.intern("a");
         let b = interner.intern("b");
         // The space is now full; a new string saturates to the highest symbol
-        // and is not stored.
+        // and is not stored. Pin the documented (M29) consequence exactly: that
+        // symbol is the last-interned string's, so it names "b", not "c".
         let saturated = interner.intern("c");
         assert_eq!(saturated.as_u32(), 2);
+        assert_eq!(saturated, b);
+        assert_eq!(interner.resolve(saturated), Some("b"));
+        assert_eq!(interner.get("c"), None);
         assert_eq!(interner.len(), 2);
         // Existing strings still resolve and dedup correctly.
         assert_eq!(interner.resolve(a), Some("a"));
         assert_eq!(interner.intern("b"), b);
+    }
+
+    // ---- Probe distribution (H03) --------------------------------------------
+    //
+    // These pin the quality of slot selection, not just correctness: a hash that
+    // dedups correctly can still pile structured keys onto a handful of home slots
+    // and turn every insert into a long linear walk. Linear probing at the 0.75
+    // load ceiling averages 2.5 probes per present key in theory, so the bounds
+    // below leave headroom for an honest hash while sitting orders of magnitude
+    // under the clustered behaviour they guard against (thousands of probes per
+    // key on the 1.0.0 hash).
+
+    /// Average probes a present key may cost.
+    const MAX_AVG_HIT_PROBES: f64 = 3.0;
+    /// Average probes an absent key may cost (theory: 8.5 at the 0.75 ceiling).
+    const MAX_AVG_MISS_PROBES: f64 = 10.0;
+    /// Worst single probe sequence for any key in any corpus.
+    const MAX_WORST_PROBES: usize = 128;
+
+    struct ProbeStats {
+        avg_hit: f64,
+        worst_hit: usize,
+        avg_miss: f64,
+        worst_miss: usize,
+    }
+
+    /// Interns `strings` into a fresh interner and measures the probe cost of
+    /// finding each one again, plus the cost of a miss for a sibling key that is
+    /// guaranteed absent (each string with a byte appended that no corpus uses).
+    fn probe_stats(strings: &[String]) -> ProbeStats {
+        let mut interner = Interner::new();
+        for s in strings {
+            let _ = interner.intern(s);
+        }
+        assert_eq!(interner.len(), strings.len(), "corpus must be distinct");
+
+        let (mut hit_total, mut worst_hit) = (0usize, 0usize);
+        let (mut miss_total, mut worst_miss) = (0usize, 0usize);
+        let mut absent = String::new();
+        for s in strings {
+            let hit = interner.probe_count(s);
+            hit_total += hit;
+            worst_hit = worst_hit.max(hit);
+
+            absent.clear();
+            absent.push_str(s);
+            absent.push('\u{1}');
+            assert_eq!(interner.get(&absent), None);
+            let miss = interner.probe_count(&absent);
+            miss_total += miss;
+            worst_miss = worst_miss.max(miss);
+        }
+        let n = strings.len() as f64;
+        ProbeStats {
+            avg_hit: hit_total as f64 / n,
+            worst_hit,
+            avg_miss: miss_total as f64 / n,
+            worst_miss,
+        }
+    }
+
+    fn assert_well_distributed(name: &str, strings: &[String]) {
+        let stats = probe_stats(strings);
+        assert!(
+            stats.avg_hit <= MAX_AVG_HIT_PROBES,
+            "{name}: average hit probes {:.2} > {MAX_AVG_HIT_PROBES}",
+            stats.avg_hit
+        );
+        assert!(
+            stats.avg_miss <= MAX_AVG_MISS_PROBES,
+            "{name}: average miss probes {:.2} > {MAX_AVG_MISS_PROBES}",
+            stats.avg_miss
+        );
+        assert!(
+            stats.worst_hit <= MAX_WORST_PROBES && stats.worst_miss <= MAX_WORST_PROBES,
+            "{name}: worst probe sequence {} hit / {} miss > {MAX_WORST_PROBES}",
+            stats.worst_hit,
+            stats.worst_miss
+        );
+    }
+
+    fn numbered(prefix: &str, n: usize) -> Vec<String> {
+        (0..n).map(|i| alloc::format!("{prefix}{i}")).collect()
+    }
+
+    /// The exact shape reported in H03: short numbered identifiers
+    /// `t0000..t7999`, which the 1.0.0 hash folded onto one home slot per
+    /// length class.
+    #[test]
+    fn h03_numbered_identifiers_do_not_cluster() {
+        let ids: Vec<String> = (0..8_000).map(|i| alloc::format!("t{i:04}")).collect();
+        assert_well_distributed("t0000..t7999", &ids);
+        let vars: Vec<String> = (0..8_000).map(|i| alloc::format!("var{i:04}")).collect();
+        assert_well_distributed("var0000..var7999", &vars);
+    }
+
+    #[test]
+    fn probes_bounded_for_100k_numbered_ids() {
+        assert_well_distributed("t{i}", &numbered("t", 100_000));
+        let padded: Vec<String> = (0..100_000).map(|i| alloc::format!("v{i:06}")).collect();
+        assert_well_distributed("v{i:06}", &padded);
+    }
+
+    #[test]
+    fn probes_bounded_for_common_prefix_ids() {
+        assert_well_distributed(
+            "common prefix",
+            &numbered("very::long::common::module::path::item_", 100_000),
+        );
+    }
+
+    #[test]
+    fn probes_bounded_for_common_suffix_ids() {
+        let ids: Vec<String> = (0..100_000)
+            .map(|i| alloc::format!("{i}_with_a_long_common_suffix_tail"))
+            .collect();
+        assert_well_distributed("common suffix", &ids);
+    }
+
+    /// The benchmark suite's own corpus, which the 1.0.0 hash clustered too.
+    #[test]
+    fn probes_bounded_for_bench_corpus() {
+        assert_well_distributed(
+            "identifier_number_{i}",
+            &numbered("identifier_number_", 100_000),
+        );
+    }
+
+    #[test]
+    fn probes_bounded_for_single_byte_strings() {
+        let ids: Vec<String> = (0u8..=0x7f).map(|b| String::from(char::from(b))).collect();
+        assert_well_distributed("single byte", &ids);
+        // Every two-byte ASCII string: the other packing path for tiny keys.
+        let pairs: Vec<String> = (0u8..=0x7f)
+            .flat_map(|a| (0u8..=0x7f).map(move |b| [char::from(a), char::from(b)]))
+            .map(|pair| pair.iter().collect())
+            .collect();
+        assert_well_distributed("two byte", &pairs);
+    }
+
+    /// The word packing must carry every byte: for each length up to three
+    /// words, changing any single byte must change the full 64-bit hash. This
+    /// pins the overlapping fixed-width reads (short-string packing and the
+    /// re-read final word) against an off-by-one that silently drops a byte.
+    #[test]
+    fn hash_sees_every_byte_at_every_length() {
+        for len in 0..=24usize {
+            let base = alloc::vec![b'a'; len];
+            let base_hash = hash_bytes(&base);
+            for pos in 0..len {
+                let mut changed = base.clone();
+                changed[pos] = b'b';
+                assert_ne!(
+                    hash_bytes(&changed),
+                    base_hash,
+                    "len {len}: byte {pos} does not reach the hash"
+                );
+            }
+        }
+    }
+
+    /// No two keys of these structured corpora share a full 64-bit hash.
+    #[test]
+    fn hash_has_no_full_width_collisions_on_structured_corpora() {
+        let mut corpora = alloc::vec![
+            numbered("t", 100_000),
+            numbered("identifier_number_", 100_000),
+            numbered("very::long::common::module::path::item_", 100_000),
+        ];
+        corpora.push((0u8..=0x7f).map(|b| String::from(char::from(b))).collect());
+        for corpus in &corpora {
+            let mut seen = alloc::collections::BTreeSet::new();
+            for s in corpus {
+                assert!(seen.insert(hash_bytes(s.as_bytes())), "collision on {s:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn probes_bounded_for_long_strings() {
+        // 1 KiB strings that share almost every byte and differ at the start, in
+        // the middle, or at the end — the hash must carry every word through.
+        let filler = "x".repeat(1_000);
+        let mut ids = Vec::new();
+        for i in 0..4_000 {
+            ids.push(alloc::format!("{i:06}{filler}"));
+            ids.push(alloc::format!("{filler}{i:06}"));
+            ids.push(alloc::format!("{}{i:06}{}", &filler[..500], &filler[500..]));
+        }
+        assert_well_distributed("long strings", &ids);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        /// H03 generalised: any `{prefix}{counter}{suffix}` family — the shape of
+        /// generated names, temporaries, and mangled paths — spreads across the
+        /// index, whatever the shared prefix and suffix are.
+        #[test]
+        fn numbered_families_stay_well_distributed(
+            prefix in "[a-zA-Z_:]{0,40}",
+            suffix in "[a-zA-Z_]{0,24}",
+            zero_pad in proptest::bool::ANY,
+        ) {
+            let ids: Vec<String> = (0..5_000)
+                .map(|i| if zero_pad {
+                    alloc::format!("{prefix}{i:05}{suffix}")
+                } else {
+                    alloc::format!("{prefix}{i}{suffix}")
+                })
+                .collect();
+            let stats = probe_stats(&ids);
+            prop_assert!(stats.avg_hit <= MAX_AVG_HIT_PROBES, "avg hit {:.2}", stats.avg_hit);
+            prop_assert!(stats.avg_miss <= MAX_AVG_MISS_PROBES, "avg miss {:.2}", stats.avg_miss);
+            prop_assert!(
+                stats.worst_hit <= MAX_WORST_PROBES && stats.worst_miss <= MAX_WORST_PROBES,
+                "worst {} / {}", stats.worst_hit, stats.worst_miss
+            );
+        }
     }
 
     proptest! {

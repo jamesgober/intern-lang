@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name    = "intern-lang"
-version = "1.0.0"
+version = "1.0.1"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.85"
@@ -73,6 +73,8 @@ loom = "0.7"
 [[bench]]
 name    = "bench"
 harness = false
+# The suite includes the `std`-only ConcurrentInterner.
+required-features = ["std"]
 
 
 # RELEASE PROFILE

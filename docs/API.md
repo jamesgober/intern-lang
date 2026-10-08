@@ -182,6 +182,10 @@ Bytes live once, appended end to end in a single buffer; a symbol indexes a side
 table of `(start, len)` spans into that buffer, so a symbol is four bytes
 regardless of string length. Deduplication runs through an open-addressing hash
 index that stores symbol ids, not strings, so it adds no second copy of the bytes.
+The home slot and the cached fingerprint come from disjoint bits of a fully mixed
+64-bit hash, so structured keys — numbered identifiers, long shared prefixes or
+suffixes — spread across the index instead of clustering (probe counts are
+pinned by tests at 100k keys).
 
 **Derives:** `Debug` (shows the string and byte counts, not the contents),
 `Default`.
@@ -247,8 +251,20 @@ symbol is returned.
 - `s` — the string to intern. Any `&str`, including the empty string and
   arbitrary Unicode, is accepted.
 
-**Returns:** the symbol for `s`. The result always round-trips:
-`interner.resolve(interner.intern(s))` is `Some(s)`.
+**Returns:** the symbol for `s`. Below the symbol-space bound the result always
+round-trips: `interner.resolve(interner.intern(s))` is `Some(s)`.
+
+**At the symbol-space bound** (all `u32::MAX` symbols issued — in practice memory
+runs out first): a string that is already interned still returns its own symbol.
+A *new* string is not stored, and `intern` returns the highest symbol, id
+`u32::MAX`, without panicking. That symbol belongs to the last string interned
+before the space filled, so it compares equal to that string's symbol and
+`resolve` returns that other string, not `s`; round-trip and distinctness do not
+hold for that one return value, and the interner itself stays consistent. No
+symbol value can be reserved to mean "no string" without lowering the documented
+`u32::MAX` capacity, so 1.x keeps this behaviour (a cleaner contract is planned
+for 2.0). Use [`try_intern`](#internertry_intern) wherever the bound could be
+approached.
 
 ```rust
 use intern_lang::Interner;
@@ -493,7 +509,9 @@ same symbol, even when several threads intern it at once.
 
 - `s` — the string to intern.
 
-**Returns:** the symbol for `s`.
+**Returns:** the symbol for `s`. At the symbol-space bound it behaves exactly like
+[`Interner::intern`](#internerintern): a new string is not stored and the highest
+symbol, which names a different string, is returned without panicking.
 
 ```rust
 use std::sync::Arc;
@@ -710,8 +728,11 @@ tests against a `HashMap` reference interner:
 
 Symbol ids span `1..=u32::MAX`, so an interner holds up to `u32::MAX` distinct
 strings — a bound that exhausts memory long before the id space. At the bound,
-[`intern`](#internerintern) saturates while [`try_intern`](#internertry_intern)
-returns [`InternError::SymbolSpaceExhausted`](#internerror).
+[`try_intern`](#internertry_intern) returns
+[`InternError::SymbolSpaceExhausted`](#internerror), while
+[`intern`](#internerintern) saturates: it returns the highest symbol, which names
+the last string interned rather than the new one, so round-trip and distinctness
+hold only below the bound for `intern` (see its entry for the exact behaviour).
 
 ---
 

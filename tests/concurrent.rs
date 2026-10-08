@@ -1,5 +1,9 @@
 //! Integration tests for the thread-safe `ConcurrentInterner`, focused on
 //! correctness under contention.
+//!
+//! `ConcurrentInterner` exists only with the `std` feature, so the whole file is
+//! compiled out under `--no-default-features`.
+#![cfg(feature = "std")]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
