@@ -11,13 +11,47 @@
 
 ## [Unreleased]
 
+---
+
+## [1.1.0] - 2026-11-12
+
+The dedup index now uses a keyed hash, so identifiers built in advance to
+collide can no longer make interning quadratic. Nothing is removed or changed in
+the public API; two seeded constructors are added. See the
+[release notes](docs/release/v1.1.0.md).
+
+### Security
+
+- **Hash flooding.** The dedup hash was unkeyed and the index probes linearly,
+  so a set of strings that all land in one slot with one fingerprint could be
+  computed once, offline, and then made every `intern` and `get` of them walk the
+  whole set. 16,000 such 16-byte identifiers took 0.72 s to intern against
+  0.0013 s for ordinary names, and the cost grew with the square of the count.
+  In a `ConcurrentInterner` the write lock was held for the whole walk. The index
+  now hashes with SipHash-1-3 under a key held by each interner, and with the
+  `std` feature the default constructors draw that key from
+  `std::hash::RandomState`. The same 16,000 strings now intern in about 0.002 s.
+  A test pins probe counts for such a precomputed set: it averages about 2,000
+  probes per key on 1.0.1 and stays under 3 on 1.1.0.
+
 ### Added
+
+- `Interner::with_seed` and `Interner::with_capacity_and_seed`, plus the same two
+  on `ConcurrentInterner`. They key the hash from a seed, for reproducible probe
+  counts and timings, and for `no_std` builds that have their own source of
+  randomness. A seed others know lets them prepare colliding strings, so these
+  are documented as unsuitable for untrusted input with a fixed seed.
 
 ### Changed
 
-### Fixed
-
-### Security
+- `Interner::new`, `with_capacity` and `Default` (and the `ConcurrentInterner`
+  equivalents) pick a random hash key under `std`. Without `std` the default key
+  is a fixed constant, so a `no_std` caller facing untrusted input should pass a
+  secret seed. Symbol ids are unaffected: they follow interning order, whatever
+  the key.
+- Interning and lookups cost about 6 to 9 ns more per string on short
+  identifiers (a repeat hit went from about 14.5 ns to 21 ns, a miss from about
+  5.4 ns to 12 ns, measured side by side). `resolve` is unchanged.
 
 ---
 
@@ -218,7 +252,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/intern-lang/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/jamesgober/intern-lang/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/jamesgober/intern-lang/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/jamesgober/intern-lang/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/jamesgober/intern-lang/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/jamesgober/intern-lang/compare/v0.3.0...v0.4.0

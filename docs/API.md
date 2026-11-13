@@ -12,6 +12,7 @@
 - [`Interner`](#interner)
   - [`Interner::new`](#internernew)
   - [`Interner::with_capacity`](#internerwith_capacity)
+  - [`Interner::with_seed` / `with_capacity_and_seed`](#internerwith_seed--with_capacity_and_seed)
   - [`Interner::intern`](#internerintern)
   - [`Interner::try_intern`](#internertry_intern)
   - [`Interner::get`](#internerget)
@@ -182,10 +183,11 @@ Bytes live once, appended end to end in a single buffer; a symbol indexes a side
 table of `(start, len)` spans into that buffer, so a symbol is four bytes
 regardless of string length. Deduplication runs through an open-addressing hash
 index that stores symbol ids, not strings, so it adds no second copy of the bytes.
-The home slot and the cached fingerprint come from disjoint bits of a fully mixed
-64-bit hash, so structured keys — numbered identifiers, long shared prefixes or
-suffixes — spread across the index instead of clustering (probe counts are
-pinned by tests at 100k keys).
+The home slot and the cached fingerprint come from disjoint bits of a 64-bit
+SipHash-1-3 value keyed per interner, so structured keys (numbered identifiers,
+long shared prefixes or suffixes) spread across the index instead of clustering
+(probe counts are pinned by tests at 100k keys), and strings built in advance to
+collide do not collide in a new interner.
 
 **Derives:** `Debug` (shows the string and byte counts, not the contents),
 `Default`.
@@ -198,6 +200,13 @@ pub fn new() -> Self
 
 Creates an empty interner. No allocation happens until the first string is
 interned, so an interner that is created but never used costs nothing.
+
+**Hash key.** With the `std` feature (on by default) each interner draws its own
+random SipHash key from `std::hash::RandomState`, so colliding strings cannot be
+prepared ahead of time. Without `std` the key is a fixed constant; for untrusted
+input, use [`with_seed`](#internerwith_seed--with_capacity_and_seed) with a secret
+random seed. `with_capacity` and `Default` choose the key the same way. The key
+never affects symbol ids, which follow interning order.
 
 ```rust
 use intern_lang::Interner;
@@ -233,6 +242,31 @@ use intern_lang::Interner;
 let mut interner = Interner::with_capacity(4_096);
 let sym = interner.intern("identifier");
 assert_eq!(interner.resolve(sym), Some("identifier"));
+```
+
+### `Interner::with_seed` / `with_capacity_and_seed`
+
+```rust
+pub fn with_seed(seed: u64) -> Self
+pub fn with_capacity_and_seed(capacity: usize, seed: u64) -> Self
+```
+
+Create an empty interner whose dedup hash is keyed by `seed` (and, for the second,
+pre-sized like [`with_capacity`](#internerwith_capacity)). The same seed always
+gives the same index layout, which makes probe counts and timings reproducible.
+
+**Not for untrusted input with a known seed.** Anyone who knows the seed can
+compute strings that all land in one slot run, and each intern of them then walks
+the whole run. Use [`new`](#internernew) under `std`, or pass a seed from a secure
+random source. Symbol ids do not depend on the seed. Added in 1.1.0.
+
+```rust
+use intern_lang::Interner;
+
+let mut a = Interner::with_seed(7);
+let mut b = Interner::new();
+assert_eq!(a.intern("x"), b.intern("x"));
+assert_eq!(a.intern("y"), b.intern("y"));
 ```
 
 ### `Interner::intern`
@@ -478,16 +512,21 @@ is recovered internally rather than re-raised as a panic.
 
 **Derives:** `Debug` (shows the string count), `Default`. Is `Send + Sync`.
 
-### `ConcurrentInterner::new` / `with_capacity`
+### `ConcurrentInterner::new` / `with_capacity` / `with_seed` / `with_capacity_and_seed`
 
 ```rust
 pub fn new() -> Self
 pub fn with_capacity(capacity: usize) -> Self
+pub fn with_seed(seed: u64) -> Self
+pub fn with_capacity_and_seed(capacity: usize, seed: u64) -> Self
 ```
 
 Create an empty concurrent interner; `with_capacity` pre-sizes the dedup index for
-about `capacity` distinct strings. Both mirror the [`Interner`](#interner)
-constructors.
+about `capacity` distinct strings. All four mirror the [`Interner`](#interner)
+constructors: `new` and `with_capacity` use a random hash key, and the seeded
+forms carry the same warning as
+[`Interner::with_seed`](#internerwith_seed--with_capacity_and_seed). The seeded
+forms were added in 1.1.0.
 
 ```rust
 use intern_lang::ConcurrentInterner;
