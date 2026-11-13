@@ -130,10 +130,8 @@ no first-party crates wired.
 - **`Clone`, `iter`, and `serde` for `Interner` (rest of M29).** These are new
   public API. SemVer allows them only in a minor release, so they are recorded for
   **1.1.0**, not this patch.
-- **Hash flooding (not part of H03).** The hash is unkeyed and deterministic. The
-  finalizer fixes *accidental* clustering of structured keys; it does not stop an
-  adversary who deliberately builds colliding strings for this exact function, which
-  still degrades the index to linear probing over the colliding set. A keyed hash
-  needs a per-interner seed, and `no_std` plus zero-dependency leaves no portable
-  entropy source; the options (caller-supplied seed constructor in 1.x as additive
-  API, or a seeded default in 2.0) are recorded for the 1.1.0 / 2.0 design.
+- [x] **Hash flooding.** Done in 1.1.0. The dedup index now hashes with
+  SipHash-1-3 under a per-interner key, drawn from `std::hash::RandomState` under
+  `std`. `no_std` builds use a fixed key by default and take a secret seed through
+  the new `with_seed` / `with_capacity_and_seed` constructors, which also serve
+  callers who want a reproducible layout.

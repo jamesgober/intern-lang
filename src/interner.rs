@@ -56,9 +56,12 @@ impl Slot {
 /// index into a side table of `(start, len)` spans into that buffer, so a symbol
 /// is four bytes regardless of how long its string is. Deduplication runs through
 /// an open-addressing hash index that stores symbol ids, not strings, so it adds
-/// no second copy of the bytes. Its home slots come from a fully mixed hash, so
-/// structured keys — numbered identifiers, long shared prefixes or suffixes —
-/// spread across the index instead of piling onto a few slots.
+/// no second copy of the bytes. Its home slots come from SipHash-1-3 under a
+/// per-interner key, so structured keys (numbered identifiers, long shared
+/// prefixes or suffixes) spread across the index, and with the `std` feature
+/// strings built in advance to collide do not collide in a new interner. See
+/// [`new`](Interner::new) for how the key is chosen and
+/// [`with_seed`](Interner::with_seed) for a reproducible one.
 ///
 /// The buffer only ever appends and the span table only ever grows, so a symbol
 /// issued early keeps resolving to the same string for the interner's whole
@@ -114,6 +117,8 @@ pub struct Interner {
     /// out. It exists so [`try_intern`](Interner::try_intern) has a defined,
     /// testable exhaustion boundary.
     max_symbols: u32,
+    /// Key of the dedup hash. Random per interner under `std`; see [`HashKey`].
+    key: HashKey,
 }
 
 impl Interner {
@@ -130,16 +135,96 @@ impl Interner {
     /// let interner = Interner::new();
     /// assert!(interner.is_empty());
     /// ```
+    ///
+    /// # Hash key
+    ///
+    /// With the `std` feature (on by default) each interner gets its own random
+    /// hash key, so strings crafted ahead of time to collide in the dedup index
+    /// do not collide here. Without `std` the key is a fixed constant; when the
+    /// strings may come from an untrusted source, use
+    /// [`with_seed`](Interner::with_seed) with a secret, random seed instead.
+    /// The key never affects which symbol a string receives: symbol ids are
+    /// assigned in interning order.
     #[inline]
     #[must_use]
     pub fn new() -> Self {
+        Self::with_key(HashKey::random())
+    }
+
+    /// Creates an empty interner whose dedup hash is keyed by `seed`.
+    ///
+    /// Two interners built with the same seed lay out their index identically,
+    /// which makes probe counts and timing reproducible from run to run. That
+    /// is the point of this constructor, and also its risk: anyone who knows
+    /// the seed can compute, offline, a set of strings that all land in one
+    /// slot run and make every intern walk the whole set. **Do not use a fixed
+    /// or guessable seed for input you do not control.** Prefer
+    /// [`new`](Interner::new), which picks a random key under `std`, or pass a
+    /// seed drawn from a secure random source.
+    ///
+    /// Symbol ids do not depend on the seed. They are assigned in interning
+    /// order by every constructor, so the same sequence of strings yields the
+    /// same symbols whatever the seed is.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use intern_lang::Interner;
+    ///
+    /// let mut a = Interner::with_seed(7);
+    /// let mut b = Interner::new();
+    /// // Same strings in the same order, same symbols, whatever the key.
+    /// assert_eq!(a.intern("x"), b.intern("x"));
+    /// assert_eq!(a.intern("y"), b.intern("y"));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn with_seed(seed: u64) -> Self {
+        Self::with_key(HashKey::from_seed(seed))
+    }
+
+    /// Creates an empty interner sized for about `capacity` distinct strings,
+    /// with its dedup hash keyed by `seed`.
+    ///
+    /// This is [`with_capacity`](Interner::with_capacity) and
+    /// [`with_seed`](Interner::with_seed) together; the warning on `with_seed`
+    /// about known seeds and untrusted input applies here too.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use intern_lang::Interner;
+    ///
+    /// let mut interner = Interner::with_capacity_and_seed(1_024, 7);
+    /// let sym = interner.intern("identifier");
+    /// assert_eq!(interner.resolve(sym), Some("identifier"));
+    /// ```
+    #[must_use]
+    pub fn with_capacity_and_seed(capacity: usize, seed: u64) -> Self {
+        Self::with_key(HashKey::from_seed(seed)).reserved(capacity)
+    }
+
+    /// An empty interner using `key`. Nothing is allocated.
+    #[inline]
+    fn with_key(key: HashKey) -> Self {
         Self {
             buf: String::new(),
             spans: Vec::new(),
             table: Vec::new(),
             mask: 0,
             max_symbols: u32::MAX,
+            key,
         }
+    }
+
+    /// Pre-sizes the span table and the dedup index for `capacity` strings.
+    fn reserved(mut self, capacity: usize) -> Self {
+        if capacity > 0 {
+            self.spans.reserve(capacity);
+            let table_cap = table_capacity_for(capacity);
+            self.resize_table(table_cap);
+        }
+        self
     }
 
     /// Creates an empty interner sized to hold about `capacity` distinct strings
@@ -160,15 +245,11 @@ impl Interner {
     /// let sym = interner.intern("identifier");
     /// assert_eq!(interner.resolve(sym), Some("identifier"));
     /// ```
+    ///
+    /// The hash key is chosen as for [`new`](Interner::new).
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
-        let mut interner = Self::new();
-        if capacity > 0 {
-            interner.spans.reserve(capacity);
-            let table_cap = table_capacity_for(capacity);
-            interner.resize_table(table_cap);
-        }
-        interner
+        Self::new().reserved(capacity)
     }
 
     /// Interns `s`, returning its [`Symbol`].
@@ -216,7 +297,7 @@ impl Interner {
     /// the bound, call [`try_intern`](Interner::try_intern), which reports it as
     /// [`InternError::SymbolSpaceExhausted`] instead.
     pub fn intern(&mut self, s: &str) -> Symbol {
-        let hash = hash_bytes(s.as_bytes());
+        let hash = hash_bytes(self.key, s.as_bytes());
         if let Some(symbol) = self.lookup(s, hash) {
             return symbol;
         }
@@ -260,7 +341,7 @@ impl Interner {
     /// assert_eq!(interner.try_intern("identifier"), Ok(sym));
     /// ```
     pub fn try_intern(&mut self, s: &str) -> Result<Symbol, InternError> {
-        let hash = hash_bytes(s.as_bytes());
+        let hash = hash_bytes(self.key, s.as_bytes());
         if let Some(symbol) = self.lookup(s, hash) {
             return Ok(symbol);
         }
@@ -297,7 +378,7 @@ impl Interner {
     /// ```
     #[must_use]
     pub fn get(&self, s: &str) -> Option<Symbol> {
-        self.lookup(s, hash_bytes(s.as_bytes()))
+        self.lookup(s, hash_bytes(self.key, s.as_bytes()))
     }
 
     /// Resolves `symbol` back to the string it names, borrowing the bytes from the
@@ -469,7 +550,7 @@ impl Interner {
 
         for (i, span) in self.spans.iter().enumerate() {
             let s = &self.buf[span.start..span.start + span.len];
-            let hash = hash_bytes(s.as_bytes());
+            let hash = hash_bytes(self.key, s.as_bytes());
             let id = id_for(i + 1);
             let mut idx = slot_index(hash, mask);
             while !table[idx].is_empty() {
@@ -507,7 +588,7 @@ impl Interner {
         if self.table.is_empty() {
             return 0;
         }
-        let hash = hash_bytes(s.as_bytes());
+        let hash = hash_bytes(self.key, s.as_bytes());
         let mut idx = slot_index(hash, self.mask);
         let mut probes = 1;
         loop {
@@ -585,9 +666,8 @@ fn table_capacity_for(strings: usize) -> usize {
 
 /// Maps a hash to its home slot in a table of `mask + 1` slots.
 ///
-/// Uses the low bits. That is only sound because [`hash_bytes`] ends in a
-/// full-width avalanche ([`finish`]): every low bit depends on every input byte
-/// (see H03 there).
+/// Uses the low bits, which is sound because [`hash_bytes`] is SipHash: every
+/// output bit depends on every input byte and on the interner's key.
 #[inline]
 fn slot_index(hash: u64, mask: usize) -> usize {
     (hash as usize) & mask
@@ -605,74 +685,151 @@ fn fingerprint(hash: u64) -> u32 {
     (hash >> 32) as u32
 }
 
-/// Hashes `bytes` to a well-mixed 64-bit value for the dedup index.
+/// The 128-bit key of an interner's dedup hash.
 ///
-/// The body is an FxHash-style multiply-rotate over 64-bit little-endian words,
-/// seeded with the length. Strings of up to eight bytes are packed into a single
-/// word with overlapping fixed-width reads (two `u32`s for 4..=8 bytes, three
-/// single bytes for 1..=3), and a longer string's partial last word is read as
-/// the *final eight bytes* of the string, overlapping the previous word. Every
-/// byte reaches the state through a fixed-size load, so no length-dependent copy
-/// sits on the hot path, and for a given length the packing is injective. Each
-/// round is a bijection of the state for a fixed word, so two same-length strings
-/// that differ in a single word never collide on the full 64-bit value.
-///
-/// The body alone is not fit for slot selection (H03, fixed in 1.0.1): a
-/// multiply carries information only *upward*, so the low `k` bits of the result
-/// depend only on the low `k` bits of the last word, which for a short string are
-/// its first two or three bytes and its length. Numbered identifiers such as
-/// `t0000..t7999` or `identifier_number_{i}` then share a handful of home slots
-/// and linear probing degrades to quadratic total work. [`finish`] closes this
-/// with a xor-shift / multiply / xor-shift avalanche that makes the low bits
-/// depend on the whole state.
-///
-/// This is a non-cryptographic, unkeyed hash chosen for throughput on short
-/// identifiers. Correctness never depends on it: the dedup index always confirms
-/// a candidate with a full byte comparison.
-#[inline]
-fn hash_bytes(bytes: &[u8]) -> u64 {
-    let len = bytes.len();
-    let mut hash = len as u64;
-    if len <= 8 {
-        if len > 0 {
-            hash = round(hash, small_word(bytes));
-        }
-    } else {
-        let mut chunks = bytes.chunks_exact(8);
-        for chunk in chunks.by_ref() {
-            hash = round(hash, read_u64(chunk));
-        }
-        if !chunks.remainder().is_empty() {
-            // Re-read the last eight bytes rather than copying a short tail into
-            // a zeroed buffer. `len > 8`, so the subtraction cannot underflow.
-            hash = round(hash, read_u64(&bytes[len - 8..]));
+/// Every interner holds its own key. With the `std` feature the default
+/// constructors draw it from `std::hash::RandomState`, so the slot a string
+/// lands in cannot be predicted from outside the process, and strings built
+/// offline to collide in one interner do not collide in another. Without `std`
+/// there is no entropy source, so the default key is a fixed constant and a
+/// caller facing untrusted input passes a secret seed instead.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HashKey {
+    k0: u64,
+    k1: u64,
+}
+
+impl HashKey {
+    /// The key the default constructors use: random per interner under `std`.
+    #[cfg(feature = "std")]
+    pub(crate) fn random() -> Self {
+        use std::hash::BuildHasher;
+        // Each `RandomState` holds a secret SipHash key. Hashing two constants
+        // with it yields two secret 64-bit words.
+        let state = std::hash::RandomState::new();
+        Self {
+            k0: state.hash_one(0x6b65_795f_6b30_u64),
+            k1: state.hash_one(0x6b65_795f_6b31_u64),
         }
     }
-    finish(hash)
+
+    /// The key the default constructors use without `std`: a fixed constant,
+    /// since `core` has no entropy source.
+    #[cfg(not(feature = "std"))]
+    pub(crate) fn random() -> Self {
+        Self::from_seed(0)
+    }
+
+    /// A key derived deterministically from `seed`. Both halves go through a
+    /// SplitMix64 step, so nearby seeds give unrelated keys.
+    pub(crate) fn from_seed(seed: u64) -> Self {
+        let k0 = splitmix64(seed);
+        Self {
+            k0,
+            k1: splitmix64(k0 ^ seed.rotate_left(32)),
+        }
+    }
 }
 
-/// One FxHash-style round: fold `word` into `state`.
+/// One SplitMix64 output step, used only to expand a caller's seed into a key.
 #[inline]
-fn round(state: u64, word: u64) -> u64 {
-    const K: u64 = 0x517c_c1b7_2722_0a95;
-    (state.rotate_left(5) ^ word).wrapping_mul(K)
+fn splitmix64(x: u64) -> u64 {
+    let mut z = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
 }
 
-/// Packs a string of 1..=8 bytes into one word using fixed-width loads only.
+/// Hashes `bytes` under `key` for the dedup index: SipHash-1-3, the keyed hash
+/// behind the standard library's default `HashMap` hasher.
 ///
-/// For 4..=8 bytes the first and last four bytes are read (overlapping when the
-/// length is under eight); for 1..=3 bytes the first, middle, and last byte are
-/// taken. Either way every byte lands in the word, so for a fixed length the
-/// packing is injective — the length itself is already in the hash state.
+/// The dedup index probes linearly, so strings that share a home slot make each
+/// insert and lookup walk all of them. An unkeyed hash lets such a set be
+/// computed once, offline, and replayed against every program that uses the
+/// crate. SipHash is a keyed pseudo-random function: without the key, finding
+/// strings that collide is no easier than guessing, and with a key drawn per
+/// interner a precomputed set is useless. Correctness never depends on the
+/// hash: the index always confirms a candidate with a full byte comparison.
 #[inline]
-fn small_word(bytes: &[u8]) -> u64 {
-    let len = bytes.len();
+fn hash_bytes(key: HashKey, bytes: &[u8]) -> u64 {
+    siphash::<1, 3>(key, bytes)
+}
+
+/// SipHash with `C` compression rounds per word and `D` finalization rounds.
+///
+/// The message is read as little-endian 64-bit words; the final word carries
+/// the last `len % 8` bytes and the low byte of the length in its top byte, as
+/// the SipHash specification requires. The tail is packed with fixed-width
+/// overlapping reads, so no length-dependent copy sits on the hot path.
+#[inline]
+fn siphash<const C: usize, const D: usize>(key: HashKey, bytes: &[u8]) -> u64 {
+    let mut v = [
+        key.k0 ^ 0x736f_6d65_7073_6575,
+        key.k1 ^ 0x646f_7261_6e64_6f6d,
+        key.k0 ^ 0x6c79_6765_6e65_7261,
+        key.k1 ^ 0x7465_6462_7974_6573,
+    ];
+    let mut chunks = bytes.chunks_exact(8);
+    for chunk in chunks.by_ref() {
+        let m = read_u64(chunk);
+        v[3] ^= m;
+        for _ in 0..C {
+            sip_round(&mut v);
+        }
+        v[0] ^= m;
+    }
+    let last = tail_word(chunks.remainder()) | ((bytes.len() as u64) << 56);
+    v[3] ^= last;
+    for _ in 0..C {
+        sip_round(&mut v);
+    }
+    v[0] ^= last;
+    v[2] ^= 0xff;
+    for _ in 0..D {
+        sip_round(&mut v);
+    }
+    v[0] ^ v[1] ^ v[2] ^ v[3]
+}
+
+/// One SipRound over the four-word state.
+#[inline(always)]
+fn sip_round(v: &mut [u64; 4]) {
+    v[0] = v[0].wrapping_add(v[1]);
+    v[1] = v[1].rotate_left(13);
+    v[1] ^= v[0];
+    v[0] = v[0].rotate_left(32);
+    v[2] = v[2].wrapping_add(v[3]);
+    v[3] = v[3].rotate_left(16);
+    v[3] ^= v[2];
+    v[0] = v[0].wrapping_add(v[3]);
+    v[3] = v[3].rotate_left(21);
+    v[3] ^= v[0];
+    v[2] = v[2].wrapping_add(v[1]);
+    v[1] = v[1].rotate_left(17);
+    v[1] ^= v[2];
+    v[2] = v[2].rotate_left(32);
+}
+
+/// Packs the 0..=7 trailing bytes of a message into the low bytes of a
+/// little-endian word, using fixed-width loads only.
+///
+/// For 4..=7 bytes the first and last four bytes are read and placed at their
+/// own offsets; where they overlap they carry the same bytes, so the OR is
+/// exact. For 1..=3 bytes the first, middle, and last byte are placed the same
+/// way.
+#[inline]
+fn tail_word(tail: &[u8]) -> u64 {
+    let len = tail.len();
     if len >= 4 {
-        let lo = read_u32(&bytes[..4]);
-        let hi = read_u32(&bytes[len - 4..]);
-        u64::from(lo) | (u64::from(hi) << 32)
+        let lo = u64::from(read_u32(&tail[..4]));
+        let hi = u64::from(read_u32(&tail[len - 4..]));
+        lo | (hi << (8 * (len - 4)))
+    } else if len > 0 {
+        u64::from(tail[0])
+            | (u64::from(tail[len / 2]) << (8 * (len / 2)))
+            | (u64::from(tail[len - 1]) << (8 * (len - 1)))
     } else {
-        u64::from(bytes[0]) | (u64::from(bytes[len / 2]) << 8) | (u64::from(bytes[len - 1]) << 16)
+        0
     }
 }
 
@@ -692,22 +849,6 @@ fn read_u32(bytes: &[u8]) -> u32 {
     let mut word = [0u8; 4];
     word.copy_from_slice(&bytes[..4]);
     u32::from_le_bytes(word)
-}
-
-/// Finalizer: xor-shift, multiply, xor-shift.
-///
-/// The first shift folds the high half of the state onto the low half, so the
-/// multiply's low bits already see every state bit; the multiply then spreads
-/// each bit upward, and the last shift brings the well-mixed high bits back down
-/// into the low bits the slot index uses. Three cheap 64-bit operations, once per
-/// string rather than per word, and no 128-bit arithmetic (so 32-bit targets pay
-/// no widening-multiply penalty). The multiplier is 2^64 / φ, the usual
-/// Fibonacci-hashing constant (odd, so the multiply is a bijection).
-#[inline]
-fn finish(state: u64) -> u64 {
-    const M: u64 = 0x9e37_79b9_7f4a_7c15;
-    let h = (state ^ (state >> 32)).wrapping_mul(M);
-    h ^ (h >> 32)
 }
 
 #[cfg(test)]
@@ -886,6 +1027,10 @@ mod tests {
     const MAX_AVG_MISS_PROBES: f64 = 10.0;
     /// Worst single probe sequence for any key in any corpus.
     const MAX_WORST_PROBES: usize = 128;
+    /// Seed for the distribution tests. A fixed key keeps the worst-case probe
+    /// bound deterministic; with a random key, a long run at the 0.75 load
+    /// ceiling is rare but possible, which would make the test flaky.
+    const TEST_SEED: u64 = 0x5eed;
 
     struct ProbeStats {
         avg_hit: f64,
@@ -898,7 +1043,11 @@ mod tests {
     /// finding each one again, plus the cost of a miss for a sibling key that is
     /// guaranteed absent (each string with a byte appended that no corpus uses).
     fn probe_stats(strings: &[String]) -> ProbeStats {
-        let mut interner = Interner::new();
+        probe_stats_in(Interner::with_seed(TEST_SEED), strings)
+    }
+
+    /// [`probe_stats`] over a caller-built interner.
+    fn probe_stats_in(mut interner: Interner, strings: &[String]) -> ProbeStats {
         for s in strings {
             let _ = interner.intern(s);
         }
@@ -1010,18 +1159,19 @@ mod tests {
 
     /// The word packing must carry every byte: for each length up to three
     /// words, changing any single byte must change the full 64-bit hash. This
-    /// pins the overlapping fixed-width reads (short-string packing and the
-    /// re-read final word) against an off-by-one that silently drops a byte.
+    /// pins the overlapping fixed-width tail reads against an off-by-one that
+    /// silently drops a byte.
     #[test]
     fn hash_sees_every_byte_at_every_length() {
+        let key = HashKey::from_seed(1);
         for len in 0..=24usize {
             let base = alloc::vec![b'a'; len];
-            let base_hash = hash_bytes(&base);
+            let base_hash = hash_bytes(key, &base);
             for pos in 0..len {
                 let mut changed = base.clone();
                 changed[pos] = b'b';
                 assert_ne!(
-                    hash_bytes(&changed),
+                    hash_bytes(key, &changed),
                     base_hash,
                     "len {len}: byte {pos} does not reach the hash"
                 );
@@ -1032,6 +1182,7 @@ mod tests {
     /// No two keys of these structured corpora share a full 64-bit hash.
     #[test]
     fn hash_has_no_full_width_collisions_on_structured_corpora() {
+        let key = HashKey::from_seed(1);
         let mut corpora = alloc::vec![
             numbered("t", 100_000),
             numbered("identifier_number_", 100_000),
@@ -1041,7 +1192,10 @@ mod tests {
         for corpus in &corpora {
             let mut seen = alloc::collections::BTreeSet::new();
             for s in corpus {
-                assert!(seen.insert(hash_bytes(s.as_bytes())), "collision on {s:?}");
+                assert!(
+                    seen.insert(hash_bytes(key, s.as_bytes())),
+                    "collision on {s:?}"
+                );
             }
         }
     }
@@ -1058,6 +1212,122 @@ mod tests {
             ids.push(alloc::format!("{}{i:06}{}", &filler[..500], &filler[500..]));
         }
         assert_well_distributed("long strings", &ids);
+    }
+
+    // ---- Keyed hash ----------------------------------------------------------
+
+    /// The SipHash core matches the reference implementation bit for bit. The
+    /// standard library still ships SipHash-2-4 as `core::hash::SipHasher`
+    /// (deprecated for general use, but a fine reference), so the same core
+    /// with two compression and four finalization rounds must agree with it
+    /// for every length and several keys. That pins the word order, the tail
+    /// packing, and the length byte.
+    #[test]
+    #[allow(deprecated)]
+    fn siphash_core_matches_the_reference() {
+        use core::hash::{Hasher, SipHasher};
+        let msg: Vec<u8> = (0u8..=200).collect();
+        for seed in [0u64, 1, 0xdead_beef, u64::MAX] {
+            let key = HashKey::from_seed(seed);
+            for len in 0..=msg.len() {
+                let mut reference = SipHasher::new_with_keys(key.k0, key.k1);
+                reference.write(&msg[..len]);
+                assert_eq!(
+                    siphash::<2, 4>(key, &msg[..len]),
+                    reference.finish(),
+                    "seed {seed}, len {len}"
+                );
+            }
+        }
+    }
+
+    /// Builds `n` distinct 16-byte ASCII strings that the unkeyed 1.0.x hash
+    /// sent to one home slot with one fingerprint, however large the table.
+    fn precomputed_collisions(n: usize) -> Vec<String> {
+        const K: u64 = 0x517c_c1b7_2722_0a95;
+        const TARGET: u64 = 0x5f5f_5f5f_5f5f_5f5f;
+        let mut out = Vec::with_capacity(n);
+        let mut counter: u64 = 0;
+        while out.len() < n {
+            counter += 1;
+            let mut first = [0u8; 8];
+            let mut c = counter;
+            for b in &mut first {
+                *b = b'A' + (c % 26) as u8;
+                c /= 26;
+            }
+            let w1 = u64::from_le_bytes(first);
+            let s1 = (16u64.rotate_left(5) ^ w1).wrapping_mul(K);
+            let w2 = s1.rotate_left(5) ^ TARGET;
+            let second = w2.to_le_bytes();
+            if second.iter().all(u8::is_ascii) {
+                let mut bytes = first.to_vec();
+                bytes.extend_from_slice(&second);
+                out.push(String::from_utf8(bytes).unwrap());
+            }
+        }
+        out
+    }
+
+    /// Strings computed in advance to collide must not cluster. On the
+    /// unkeyed 1.0.x hash all 4,000 of these shared one slot and one
+    /// fingerprint, so each lookup walked the whole run: about 2,000 probes per
+    /// key on average, against a bound of three here.
+    #[test]
+    fn precomputed_collisions_do_not_cluster() {
+        let keys = precomputed_collisions(4_000);
+        assert_well_distributed("precomputed collisions", &keys);
+
+        // The default constructor's key is random, so only the averages are
+        // pinned there; the worst run varies from key to key, and 4,000 keys
+        // sit in an 8,192-slot table, so 512 is far above any honest run.
+        for _ in 0..4 {
+            let stats = probe_stats_in(Interner::new(), &keys);
+            assert!(
+                stats.avg_hit <= MAX_AVG_HIT_PROBES,
+                "avg hit {:.2}",
+                stats.avg_hit
+            );
+            assert!(
+                stats.avg_miss <= MAX_AVG_MISS_PROBES,
+                "avg miss {:.2}",
+                stats.avg_miss
+            );
+            assert!(stats.worst_hit.max(stats.worst_miss) <= 512);
+        }
+    }
+
+    /// Each default interner draws its own key under `std`, so a collision set
+    /// found against one interner says nothing about the next.
+    #[cfg(feature = "std")]
+    #[test]
+    fn default_interners_get_distinct_keys() {
+        let a = Interner::new();
+        let b = Interner::new();
+        let c = Interner::with_capacity(16);
+        assert!(a.key != b.key && b.key != c.key && a.key != c.key);
+    }
+
+    /// A seed gives a reproducible key; different seeds give different keys.
+    #[test]
+    fn seeded_keys_are_deterministic() {
+        assert!(Interner::with_seed(42).key == Interner::with_seed(42).key);
+        assert!(Interner::with_seed(42).key != Interner::with_seed(43).key);
+        assert!(Interner::with_capacity_and_seed(100, 42).key == Interner::with_seed(42).key);
+    }
+
+    /// Symbol ids follow interning order alone, never the key.
+    #[test]
+    fn symbol_ids_do_not_depend_on_the_key() {
+        let words: Vec<String> = numbered("w", 5_000);
+        let mut a = Interner::with_seed(1);
+        let mut b = Interner::with_seed(2);
+        let mut c = Interner::new();
+        for w in &words {
+            let sa = a.intern(w);
+            assert_eq!(sa, b.intern(w));
+            assert_eq!(sa, c.intern(w));
+        }
     }
 
     proptest! {

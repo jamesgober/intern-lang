@@ -86,6 +86,9 @@ assert_eq!(interner.len(), 4); // let, x, =, +
   contiguous buffer; the dedup index stores symbol ids, not a second copy.
 - **Allocation-free hits.** Interning a string already seen is a hash lookup with
   no allocation and no copy.
+- **Keyed hash.** The dedup index hashes with SipHash-1-3 under a random key per
+  interner (with `std`), so identifiers crafted in advance to collide cannot slow
+  interning down. `with_seed` gives a reproducible key for tests and benchmarks.
 - **Growth-stable symbols.** A symbol keeps resolving to the same string for the
   interner's whole lifetime, including after the backing store reallocates.
 - **Thread-safe variant.** `ConcurrentInterner` lets many threads intern into one
@@ -107,23 +110,44 @@ Resolution is a side-table index plus a slice — measured at roughly **1.4 ns p
 `resolve`** (Criterion mean, Windows x86_64, Rust stable, on the development
 machine). Interning an already-seen string is allocation-free: a hash over the
 bytes, an open-addressing probe, and one byte comparison to confirm the hit. The
-hash ends in a full-width mix, so structured keys (numbered identifiers, long
-shared prefixes) spread across the index; probe counts are pinned by tests at
-100k keys. Per-string means from the 1024-string `intern_*` benches (v1.0.1):
+hash is keyed SipHash-1-3, so structured keys (numbered identifiers, long shared
+prefixes) and deliberately colliding keys alike spread across the index; probe
+counts are pinned by tests at 100k keys. Per-string medians for pseudo-random
+1 to 12 byte identifiers, 1.0.1 and 1.1.0 run side by side in one process:
 
-| Operation | Mean |
-|---|---|
-| `resolve` (id → `&str`) | ~1.4 ns |
-| `intern` (repeat hit, no allocation) | ~16 ns |
-| `intern` (new string, amortised growth) | ~27 ns |
+| Operation | 1.0.1 | 1.1.0 |
+|---|---|---|
+| `resolve` (id → `&str`) | ~1.4 ns | ~1.4 ns (same code) |
+| `intern` (repeat hit, no allocation) | ~14.5 ns | ~21 ns |
+| `get` (miss) | ~5.4 ns | ~12 ns |
 
-At scale (`scale_*` benches, 1M distinct strings): interning into a fresh
-interner runs at roughly 7–16 M strings/s and the warm hit path at 9–17 M
-strings/s, depending on the corpus shape. Run them yourself with `cargo bench`.
+The keyed hash costs about 6 to 9 ns per string over the unkeyed 1.0.1 hash;
+that is the price of making collisions impossible to prepare in advance. At
+scale (`scale_*` benches, 1M distinct strings), 1.0.1 interned into a fresh
+interner at roughly 7–16 M strings/s and served the warm hit path at 9–17 M
+strings/s, depending on the corpus shape; 1.1.0 adds the per-string hash cost
+above to both. Run them yourself with `cargo bench`.
 The warm read path scales across threads, since hits are served under a shared
 read lock: at 8 threads the `ConcurrentInterner` sustains roughly 2.3× the
 single-thread throughput in the `concurrent_intern_existing` bench, which
 includes the cost of spawning the threads on every iteration.
+
+<br>
+
+## Untrusted input
+
+The dedup index uses open addressing, so many strings that hash to one slot make
+every lookup walk all of them. To keep that from being forced from outside, the
+index hashes with SipHash-1-3 under a key chosen per interner. With the `std`
+feature (the default), `Interner::new`, `with_capacity` and `Default` draw the key
+from `std::hash::RandomState`, the same source `HashMap` uses. Without `std` there
+is no entropy source, so the default key is fixed; pass a secret random seed with
+`Interner::with_seed` when the strings can come from an untrusted source.
+
+`with_seed` is also there for reproducible probe counts and timings. A seed that
+others know lets them compute colliding strings, so keep fixed seeds to trusted
+input. The key never changes which symbol a string gets: ids follow interning
+order.
 
 <br>
 
@@ -159,7 +183,8 @@ For the complete reference with examples, see [`docs/API.md`](./docs/API.md).
 
 - [`Symbol`](./docs/API.md#symbol) — four-byte `Copy` handle: `as_u32`, `from_u32`.
 - [`Interner`](./docs/API.md#interner) — single-threaded interner: `intern`,
-  `try_intern`, `get`, `resolve`, `resolve_with`, `len`, `with_capacity`.
+  `try_intern`, `get`, `resolve`, `resolve_with`, `len`, `with_capacity`,
+  `with_seed`.
 - [`ConcurrentInterner`](./docs/API.md#concurrentinterner) — thread-safe interner
   sharing one symbol space (requires the `std` feature).
 - [`Lookup`](./docs/API.md#lookup) — read-side trait both interners implement.
@@ -169,9 +194,9 @@ For the complete reference with examples, see [`docs/API.md`](./docs/API.md).
 
 ## Status
 
-**`v1.0.1` — stable.** The public surface — the core interner, the symbol, the
+**`v1.1.0`, stable.** The public surface (the core interner, the symbol, the
 thread-safe `ConcurrentInterner`, the fallible `try_intern`/`InternError`
-contract, and optional `serde` for `Symbol` — is frozen under SemVer until 2.0. No
+contract, and optional `serde` for `Symbol`) is frozen under SemVer until 2.0. No
 breaking change will be made without a major bump; see <a href="./docs/API.md#stability">Stability</a>.
 
 <hr>

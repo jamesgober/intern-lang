@@ -76,6 +76,9 @@ impl ConcurrentInterner {
     /// Creates an empty concurrent interner. Like [`Interner::new`], no allocation
     /// happens until the first string is interned.
     ///
+    /// With the `std` feature, which this type requires, the dedup hash gets a
+    /// random key per interner, as [`Interner::new`] describes.
+    ///
     /// # Examples
     ///
     /// ```
@@ -106,6 +109,47 @@ impl ConcurrentInterner {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             inner: RwLock::new(Interner::with_capacity(capacity)),
+        }
+    }
+
+    /// Creates an empty concurrent interner whose dedup hash is keyed by `seed`.
+    /// See [`Interner::with_seed`], including its warning: a known seed lets
+    /// colliding strings be computed in advance, so do not use a fixed or
+    /// guessable seed for input you do not control. [`new`](Self::new) already
+    /// picks a random key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use intern_lang::ConcurrentInterner;
+    ///
+    /// let interner = ConcurrentInterner::with_seed(7);
+    /// let sym = interner.intern("loop");
+    /// assert_eq!(interner.resolve(sym).as_deref(), Some("loop"));
+    /// ```
+    #[must_use]
+    pub fn with_seed(seed: u64) -> Self {
+        Self {
+            inner: RwLock::new(Interner::with_seed(seed)),
+        }
+    }
+
+    /// Creates an empty concurrent interner sized for about `capacity` distinct
+    /// strings, with its dedup hash keyed by `seed`. See
+    /// [`Interner::with_capacity_and_seed`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use intern_lang::ConcurrentInterner;
+    ///
+    /// let interner = ConcurrentInterner::with_capacity_and_seed(4_096, 7);
+    /// assert!(interner.is_empty());
+    /// ```
+    #[must_use]
+    pub fn with_capacity_and_seed(capacity: usize, seed: u64) -> Self {
+        Self {
+            inner: RwLock::new(Interner::with_capacity_and_seed(capacity, seed)),
         }
     }
 
