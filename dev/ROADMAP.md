@@ -69,7 +69,7 @@ Exit criteria:
 ## v1.0.1 — Patch: slot-selection quality (H03) and exhaustion docs (M29) (DONE)
 
 A patch on the frozen 1.0 surface: no public item added, removed, or changed.
-Fixes ledger items H03 and M29 from `_lexersketch/ISSUES.md`.
+Fixes ledger items H03 and M29 from the issue ledger.
 
 Delivered:
 - [x] **H03 — clustered slot selection.** The 1.0.0 dedup index took the home
